@@ -1,0 +1,11 @@
+{
+  "name": "search",
+  "description": "Search the web and return top results.",
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "query": {"type": "string"}
+    },
+    "required": ["query"]
+  }
+}
