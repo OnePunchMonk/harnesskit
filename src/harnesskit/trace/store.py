@@ -31,3 +31,34 @@ def load_trajectory(path: Path) -> Trajectory:
 
 def list_trajectories(harness_dir: Path) -> list[Path]:
     return sorted(runs_dir(harness_dir).glob("*.json"))
+
+
+def baselines_dir(harness_dir: Path) -> Path:
+    d = harness_dir / ".harness" / "baselines"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def save_baseline(harness_dir: Path, name: str, trajectories_by_case_id: dict[str, Trajectory]) -> Path:
+    """Snapshot a completed eval run as a named baseline: {case_id: trajectory}.
+
+    Stored separately from .harness/runs/ (which holds the *latest* run and
+    gets overwritten every `harness eval`) so a baseline survives future runs
+    and can be diffed against with `harness eval --compare <name>`.
+    """
+    path = baselines_dir(harness_dir) / f"{name}.json"
+    payload = {case_id: json.loads(t.model_dump_json()) for case_id, t in trajectories_by_case_id.items()}
+    path.write_text(json.dumps(payload, indent=2))
+    return path
+
+
+def load_baseline(harness_dir: Path, name: str) -> dict[str, Trajectory]:
+    path = baselines_dir(harness_dir) / f"{name}.json"
+    if not path.exists():
+        raise FileNotFoundError(f"No baseline named '{name}' at {path}")
+    payload = json.loads(path.read_text())
+    return {case_id: Trajectory.model_validate(data) for case_id, data in payload.items()}
+
+
+def list_baselines(harness_dir: Path) -> list[str]:
+    return sorted(p.stem for p in baselines_dir(harness_dir).glob("*.json"))

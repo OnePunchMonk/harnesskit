@@ -7,10 +7,13 @@ from rich.console import Console
 from rich.table import Table
 
 from harnesskit.adapters import RawAPIAdapter
-from harnesskit.eval import check_regression, compare, run_suite
+from harnesskit.eval import SuiteResult, check_regression, compare, run_suite
+from harnesskit.eval.engine import CaseResult
+from harnesskit.eval.scorers import score_trajectory
 from harnesskit.linter import Severity, lint
 from harnesskit.parser import HarnessLoadError, load_harness
-from harnesskit.trace import save_trajectory
+from harnesskit.trace import list_baselines, load_baseline, save_trajectory
+from harnesskit.trace import save_baseline as save_baseline_fn
 
 app = typer.Typer(no_args_is_help=True, help="harnesskit: infrastructure for building agent harnesses")
 console = Console()
@@ -166,6 +169,8 @@ def run(
 def eval_cmd(
     directory: Path = typer.Argument(Path(".")),
     sample: int = typer.Option(None, "--sample", help="Run only the first N cases"),
+    save_baseline: str = typer.Option(None, "--save-baseline", help="Snapshot this run under a name for future --compare"),
+    compare_baseline: str = typer.Option(None, "--compare", help="Diff this run against a saved baseline; fail on regression"),
     verbose: bool = typer.Option(False, "--verbose"),
 ) -> None:
     """Run the harness against its eval suite via the raw-API adapter."""
@@ -202,6 +207,45 @@ def eval_cmd(
         f"\npass_rate={suite.pass_rate:.2f}  avg_turns={suite.avg_turns:.1f}  "
         f"avg_cost=${suite.avg_cost_usd:.4f}  dup_tool_calls={suite.total_duplicate_tool_calls}"
     )
+
+    if save_baseline:
+        path = save_baseline_fn(directory, save_baseline, {r.case.id: r.trajectory for r in suite.results})
+        console.print(f"[dim]baseline '{save_baseline}' saved to {path}[/dim]")
+
+    if compare_baseline:
+        try:
+            baseline_trajectories = load_baseline(directory, compare_baseline)
+        except FileNotFoundError as e:
+            available = list_baselines(directory)
+            console.print(f"[red]✗[/red] {e}" + (f" (available: {', '.join(available)})" if available else ""))
+            raise typer.Exit(1)
+
+        baseline_results = [
+            CaseResult(case=c, trajectory=baseline_trajectories[c.id], scores=score_trajectory(baseline_trajectories[c.id], c))
+            for c in result.spec.eval.cases
+            if c.id in baseline_trajectories
+        ]
+        baseline_suite = SuiteResult(harness_name=f"{result.spec.metadata.name}@{compare_baseline}", results=baseline_results)
+
+        reg = check_regression(baseline_suite, suite, result.spec.eval.thresholds)
+        ab_table = Table(show_header=True, header_style="bold", title=f"vs baseline '{compare_baseline}'")
+        ab_table.add_column("metric")
+        ab_table.add_column("baseline")
+        ab_table.add_column("current")
+        ab_table.add_column("Δ")
+        ab = compare(baseline_suite, suite)
+        for d in ab.deltas:
+            sign = "+" if d.delta >= 0 else ""
+            ab_table.add_row(d.metric, f"{d.a:.3f}", f"{d.b:.3f}", f"{sign}{d.delta:.3f}")
+        console.print(ab_table)
+
+        if not reg.ok:
+            console.print("[red]✗ regression detected:[/red]")
+            for d in reg.regressions:
+                console.print(f"  - {d.metric}: {d.a:.3f} -> {d.b:.3f} (Δ {d.delta:+.3f})")
+            raise typer.Exit(1)
+        console.print("[green]✓[/green] no regression beyond configured tolerances")
+
     if suite.pass_rate < 1.0:
         raise typer.Exit(1)
 
