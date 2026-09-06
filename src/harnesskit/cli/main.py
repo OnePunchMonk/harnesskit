@@ -11,6 +11,7 @@ from harnesskit.eval import SuiteResult, check_regression, compare, run_suite
 from harnesskit.eval.engine import CaseResult
 from harnesskit.eval.scorers import score_trajectory
 from harnesskit.linter import Severity, lint
+from harnesskit.packaging import export_bundle, import_bundle, preview_bundle
 from harnesskit.parser import HarnessLoadError, load_harness
 from harnesskit.trace import list_baselines, load_baseline, save_trajectory
 from harnesskit.trace import save_baseline as save_baseline_fn
@@ -346,24 +347,110 @@ def ab(
 
 
 @app.command()
-def watch(directory: Path = typer.Argument(Path("."))) -> None:
-    """Re-run evals on file changes."""
-    console.print("[yellow]not yet implemented[/yellow]")
-    raise typer.Exit(2)
+def watch(
+    directory: Path = typer.Argument(Path(".")),
+    sample: int = typer.Option(None, "--sample", help="Also re-run this many eval cases on change (costs API calls)"),
+    adapter_name: str = typer.Option("raw_api", "--adapter"),
+) -> None:
+    """Re-lint (and optionally re-eval a sample) on every file change under the harness directory."""
+    import time
+
+    console.print(f"[dim]watching {directory} — Ctrl+C to stop[/dim]")
+
+    def _fingerprint() -> dict[str, float]:
+        return {
+            str(p): p.stat().st_mtime
+            for p in directory.rglob("*")
+            if p.is_file() and ".harness" not in p.parts and "__pycache__" not in p.parts
+        }
+
+    def _check_once() -> None:
+        try:
+            result = load_harness(directory)
+        except HarnessLoadError as e:
+            console.print(f"[red]✗[/red] {e}")
+            return
+        findings = lint(result.spec)
+        errors = [f for f in findings if f.severity == Severity.error]
+        warnings = [f for f in findings if f.severity != Severity.error]
+        status = "[green]✓ lint clean[/green]" if not findings else f"[yellow]{len(warnings)} warning(s)[/yellow], [red]{len(errors)} error(s)[/red]"
+        console.print(f"[dim]{time.strftime('%H:%M:%S')}[/dim] {status}")
+        for f in findings:
+            color = {Severity.error: "red", Severity.warning: "yellow", Severity.info: "cyan"}[f.severity]
+            console.print(f"  [{color}]{f.severity.value}[/{color}] {f.rule}: {f.message}")
+
+        if sample and result.spec.eval.cases and not errors:
+            try:
+                adapter = ADAPTERS[adapter_name]()
+                suite = run_suite(result.spec, adapter, sample=sample)
+                console.print(f"  eval (sample={sample}): pass_rate={suite.pass_rate:.2f} avg_cost=${suite.avg_cost_usd:.4f}")
+            except Exception as e:  # noqa: BLE001 — keep the watch loop alive on a bad run
+                console.print(f"  [red]eval failed:[/red] {e}")
+
+    last = _fingerprint()
+    _check_once()
+    try:
+        while True:
+            time.sleep(1.0)
+            current = _fingerprint()
+            if current != last:
+                last = current
+                _check_once()
+    except KeyboardInterrupt:
+        console.print("\n[dim]stopped watching[/dim]")
 
 
 @app.command(name="export")
-def export_cmd(directory: Path = typer.Argument(Path("."))) -> None:
+def export_cmd(
+    directory: Path = typer.Argument(Path(".")),
+    output: Path = typer.Option(None, "--output", "-o", help="Bundle path (default: <harness-name>.harn)"),
+) -> None:
     """Package the harness as a portable .harn bundle."""
-    console.print("[yellow]not yet implemented[/yellow]")
-    raise typer.Exit(2)
+    try:
+        result = load_harness(directory)
+    except HarnessLoadError as e:
+        console.print(f"[red]✗[/red] {e}")
+        raise typer.Exit(1)
+
+    out = output or Path(f"{result.spec.metadata.name}.harn")
+    bundle = export_bundle(directory, out)
+    console.print(f"[green]✓[/green] Wrote {bundle.path} ({bundle.file_count} files)")
+    if bundle.required_mcp_servers:
+        console.print(f"  requires MCP servers: {', '.join(bundle.required_mcp_servers)}")
 
 
 @app.command(name="import")
-def import_cmd(bundle: Path) -> None:
+def import_cmd(
+    bundle: Path,
+    directory: Path = typer.Option(None, help="Where to unpack it (default: ./<harness-name>)"),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip the code-review confirmation prompt"),
+) -> None:
     """Unpack a .harn bundle into a harness directory."""
-    console.print("[yellow]not yet implemented[/yellow]")
-    raise typer.Exit(2)
+    try:
+        preview = preview_bundle(bundle)
+    except (KeyError, FileNotFoundError) as e:
+        console.print(f"[red]✗[/red] Not a valid .harn bundle: {e}")
+        raise typer.Exit(1)
+
+    console.print(f"Bundle: {preview.manifest['harness_name']} v{preview.manifest['harness_version']}")
+    console.print(f"  {len(preview.files)} files")
+    if preview.code_files:
+        console.print(f"  [yellow]{len(preview.code_files)} Python file(s) will be added — review before running this harness:[/yellow]")
+        for f in preview.code_files:
+            console.print(f"    - {f}")
+    if not yes:
+        confirmed = typer.confirm("Unpack this bundle?", default=False)
+        if not confirmed:
+            console.print("Aborted.")
+            raise typer.Exit(1)
+
+    target = directory or Path(preview.manifest["harness_name"])
+    try:
+        import_bundle(bundle, target)
+    except (FileExistsError, ValueError) as e:
+        console.print(f"[red]✗[/red] {e}")
+        raise typer.Exit(1)
+    console.print(f"[green]✓[/green] Unpacked to {target}/ — checksums verified")
 
 
 if __name__ == "__main__":
