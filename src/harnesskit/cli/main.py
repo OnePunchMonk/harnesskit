@@ -6,7 +6,7 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-from harnesskit.adapters import RawAPIAdapter
+from harnesskit.adapters import ADAPTERS, check_support
 from harnesskit.eval import SuiteResult, check_regression, compare, run_suite
 from harnesskit.eval.engine import CaseResult
 from harnesskit.eval.scorers import score_trajectory
@@ -135,20 +135,32 @@ def _fail(message: str, verbose: bool, exc: Exception | None = None) -> None:
     raise typer.Exit(1)
 
 
+def _resolve_adapter(name: str, spec) -> object:
+    adapter_cls = ADAPTERS.get(name)
+    if adapter_cls is None:
+        console.print(f"[red]✗[/red] Unknown adapter '{name}'. Available: {', '.join(ADAPTERS)}")
+        raise typer.Exit(1)
+    adapter = adapter_cls()
+    for warning in check_support(spec, adapter):
+        console.print(f"[yellow]warning[/yellow]: {warning}")
+    return adapter
+
+
 @app.command()
 def run(
     directory: Path = typer.Argument(Path(".")),
     input: str = typer.Option(..., "--input", help="Task to run the harness on"),
+    adapter_name: str = typer.Option("raw_api", "--adapter", help=f"One of: {', '.join(ADAPTERS)}"),
     verbose: bool = typer.Option(False, "--verbose"),
 ) -> None:
-    """Execute the harness on a single input via the raw-API adapter."""
+    """Execute the harness on a single input."""
     try:
         result = load_harness(directory)
     except HarnessLoadError as e:
         console.print(f"[red]✗[/red] {e}")
         raise typer.Exit(1)
 
-    adapter = RawAPIAdapter()
+    adapter = _resolve_adapter(adapter_name, result.spec)
     try:
         agent = adapter.build(result.spec)
         trajectory = adapter.run(agent, input)
@@ -169,11 +181,12 @@ def run(
 def eval_cmd(
     directory: Path = typer.Argument(Path(".")),
     sample: int = typer.Option(None, "--sample", help="Run only the first N cases"),
+    adapter_name: str = typer.Option("raw_api", "--adapter", help=f"One of: {', '.join(ADAPTERS)}"),
     save_baseline: str = typer.Option(None, "--save-baseline", help="Snapshot this run under a name for future --compare"),
     compare_baseline: str = typer.Option(None, "--compare", help="Diff this run against a saved baseline; fail on regression"),
     verbose: bool = typer.Option(False, "--verbose"),
 ) -> None:
-    """Run the harness against its eval suite via the raw-API adapter."""
+    """Run the harness against its eval suite."""
     try:
         result = load_harness(directory)
     except HarnessLoadError as e:
@@ -183,8 +196,9 @@ def eval_cmd(
         console.print("[yellow]No eval cases defined in this harness.[/yellow]")
         raise typer.Exit(1)
 
+    adapter = _resolve_adapter(adapter_name, result.spec)
     try:
-        suite = run_suite(result.spec, RawAPIAdapter(), sample=sample)
+        suite = run_suite(result.spec, adapter, sample=sample)
     except ImportError as e:
         _fail(str(e), verbose, e)
     except Exception as e:  # noqa: BLE001 — provider/auth errors surfaced concisely by default
@@ -254,15 +268,21 @@ app.command(name="eval")(eval_cmd)
 
 
 @app.command()
-def ab(dir1: Path, dir2: Path, sample: int = typer.Option(None, "--sample"), verbose: bool = typer.Option(False, "--verbose")) -> None:
-    """A/B two harness versions on the same eval suite."""
+def ab(
+    dir1: Path,
+    dir2: Path,
+    sample: int = typer.Option(None, "--sample"),
+    adapter_name: str = typer.Option("raw_api", "--adapter", help=f"One of: {', '.join(ADAPTERS)}"),
+    verbose: bool = typer.Option(False, "--verbose"),
+) -> None:
+    """A/B two harness versions on the same eval suite. Both must use the same adapter."""
     try:
         r1, r2 = load_harness(dir1), load_harness(dir2)
     except HarnessLoadError as e:
         console.print(f"[red]✗[/red] {e}")
         raise typer.Exit(1)
 
-    adapter = RawAPIAdapter()
+    adapter = _resolve_adapter(adapter_name, r1.spec)
     try:
         suite_a = run_suite(r1.spec, adapter, sample=sample)
         suite_b = run_suite(r2.spec, adapter, sample=sample)

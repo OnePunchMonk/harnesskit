@@ -12,6 +12,7 @@ dependencies = [
 
 [project.optional-dependencies]
 anthropic = ["anthropic>=0.40"]
+pydantic-ai = ["pydantic-ai>=2.0"]
 
 [project.scripts]
 harness = "harnesskit.cli.main:app"

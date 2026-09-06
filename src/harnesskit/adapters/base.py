@@ -55,4 +55,12 @@ def check_support(spec: HarnessSpec, adapter: HarnessAdapter) -> list[str]:
     for tool in spec.tools:
         if tool.source.value not in caps.tool_sources:
             warnings.append(f"tool '{tool.name}' has source='{tool.source.value}', unsupported by this adapter")
+    if spec.memory.session not in caps.memory_backends:
+        warnings.append(
+            f"memory.session='{spec.memory.session}' is not supported by this adapter "
+            f"(supports: {', '.join(sorted(caps.memory_backends))})"
+        )
+    for hook in spec.hooks:
+        if hook.point.value not in caps.hook_points:
+            warnings.append(f"hook at point='{hook.point.value}' is not supported by this adapter (ignored at runtime)")
     return warnings

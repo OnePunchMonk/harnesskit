@@ -11,11 +11,11 @@ string — useful for linting/dry-run without wiring real side effects yet.
 """
 from __future__ import annotations
 
-import importlib.util
 import json
 import time
 from pathlib import Path
 
+from harnesskit.adapters._tool_loading import load_tool_callback
 from harnesskit.adapters.base import AdapterCapabilities, RunnableAgent
 from harnesskit.format.spec import HarnessSpec, TerminationCondition
 from harnesskit.trace.schema import Step, StepType, Trajectory, estimate_cost_usd
@@ -23,16 +23,6 @@ from harnesskit.trace.schema import Step, StepType, Trajectory, estimate_cost_us
 
 class MissingAPIKeyError(Exception):
     pass
-
-
-def _load_tool_callback(harness_dir: Path, tool_ref: str):
-    py_path = (harness_dir / tool_ref).with_suffix(".py")
-    if not py_path.exists():
-        return None
-    spec = importlib.util.spec_from_file_location(py_path.stem, py_path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)  # type: ignore[union-attr]
-    return getattr(module, "run", None)
 
 
 class RawAPIAdapter:
@@ -61,7 +51,7 @@ class RawAPIAdapter:
             schema_path = spec.source_dir / tool.ref
             schema = json.loads(schema_path.read_text())
             tool_schemas.append(schema)
-            callbacks[tool.name] = _load_tool_callback(spec.source_dir, tool.ref)
+            callbacks[tool.name] = load_tool_callback(spec.source_dir, tool.ref)
 
         return RunnableAgent(spec=spec, handle={"client": client, "tool_schemas": tool_schemas, "callbacks": callbacks})
 
