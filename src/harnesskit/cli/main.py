@@ -76,10 +76,50 @@ def inspect(directory: Path = typer.Argument(Path("."), help="Harness directory"
 
 @app.command()
 def init(
-    name: str = typer.Argument(..., help="Harness name"),
+    name: str = typer.Argument(None, help="Harness name (omit when using --spec; the plan names itself)"),
+    spec: str = typer.Option(None, "--spec", help="Natural-language description — scaffolds via an LLM call + self-validation"),
     directory: Path = typer.Option(None, help="Where to create it (default: ./<name>)"),
+    verbose: bool = typer.Option(False, "--verbose"),
 ) -> None:
-    """Scaffold a minimal, runnable harness directory (full NL-spec scaffolder: see scaffold/ module)."""
+    """Scaffold a harness directory: a minimal skeleton by default, or a
+    filled-in one from a natural-language description via --spec."""
+    if spec:
+        from harnesskit.scaffold import generate_harness, infer_plan, validate_and_fix
+
+        try:
+            plan = infer_plan(spec)
+        except ImportError as e:
+            _fail(str(e), verbose, e)
+        except Exception as e:  # noqa: BLE001 — provider/auth errors surfaced concisely by default
+            _fail(f"Spec inference failed: {e}", verbose, e)
+
+        target = directory or Path(name or plan.name)
+        try:
+            generate_harness(plan, target)
+        except FileExistsError as e:
+            console.print(f"[red]✗[/red] {e}")
+            raise typer.Exit(1)
+
+        console.print(f"[green]✓[/green] Generated {plan.resolved_domain()} harness at {target}/ from spec")
+
+        result, findings = validate_and_fix(target)
+        errors = [f for f in findings if f.severity == Severity.error]
+        warnings = [f for f in findings if f.severity != Severity.error]
+        for f in warnings:
+            console.print(f"  [yellow]{f.severity.value}[/yellow]: {f.message}")
+        if errors:
+            for f in errors:
+                console.print(f"  [red]error[/red]: {f.message}  ({f.fix})")
+            console.print(f"\n[yellow]Generated with {len(errors)} unresolved lint error(s)[/yellow] — see above.")
+        else:
+            console.print("\n[green]✓[/green] Self-validation: harness lint clean.")
+        console.print("  Wire up the tools/*.py stubs, add eval cases, then `harness eval .`")
+        return
+
+    if not name:
+        console.print("[red]✗[/red] Provide a harness name, or use --spec for a natural-language description.")
+        raise typer.Exit(1)
+
     target = directory or Path(name)
     if target.exists() and any(target.iterdir()):
         console.print(f"[red]✗[/red] {target} already exists and is not empty.")
