@@ -404,6 +404,9 @@ def watch(
 def export_cmd(
     directory: Path = typer.Argument(Path(".")),
     output: Path = typer.Option(None, "--output", "-o", help="Bundle path (default: <harness-name>.harn)"),
+    include_eval_summary: str = typer.Option(
+        None, "--include-eval-summary", help="Embed a self-reported summary of this saved baseline (see: harness eval --save-baseline)"
+    ),
 ) -> None:
     """Package the harness as a portable .harn bundle."""
     try:
@@ -413,10 +416,20 @@ def export_cmd(
         raise typer.Exit(1)
 
     out = output or Path(f"{result.spec.metadata.name}.harn")
-    bundle = export_bundle(directory, out)
+    try:
+        bundle = export_bundle(directory, out, include_eval_summary=include_eval_summary)
+    except FileNotFoundError as e:
+        console.print(f"[red]✗[/red] {e}")
+        raise typer.Exit(1)
     console.print(f"[green]✓[/green] Wrote {bundle.path} ({bundle.file_count} files)")
     if bundle.required_mcp_servers:
         console.print(f"  requires MCP servers: {', '.join(bundle.required_mcp_servers)}")
+    if bundle.eval_summary:
+        s = bundle.eval_summary
+        console.print(
+            f"  [dim]eval_summary (self-reported, unverified):[/dim] pass_rate={s['pass_rate']:.2f} "
+            f"avg_cost=${s['avg_cost_usd']:.4f} over {s['case_count']} case(s) from baseline '{s['baseline_name']}'"
+        )
 
 
 @app.command(name="import")
@@ -434,6 +447,12 @@ def import_cmd(
 
     console.print(f"Bundle: {preview.manifest['harness_name']} v{preview.manifest['harness_version']}")
     console.print(f"  {len(preview.files)} files")
+    summary = preview.manifest.get("eval_summary")
+    if summary:
+        console.print(
+            f"  [dim]author-reported eval:[/dim] pass_rate={summary['pass_rate']:.2f} "
+            f"over {summary['case_count']} case(s) — [yellow]self-reported by the author, not independently verified[/yellow]"
+        )
     if preview.code_files:
         console.print(f"  [yellow]{len(preview.code_files)} Python file(s) will be added — review before running this harness:[/yellow]")
         for f in preview.code_files:

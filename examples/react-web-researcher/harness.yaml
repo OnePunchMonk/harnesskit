@@ -48,6 +48,7 @@ termination:
     value: 12
 
 eval:
+  cases_file: eval/cases.jsonl
   cases:
     - id: capital-lookup
       input: "What is the capital of the country with the largest population in South America?"

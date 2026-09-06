@@ -45,8 +45,8 @@ def test_check_regression_flags_turn_increase():
     baseline_adapter = MockAdapter(trajectories_by_input={case.input: _trajectory(case.input, turns=3)})
     current_adapter = MockAdapter(trajectories_by_input={case.input: _trajectory(case.input, turns=9)})
 
-    baseline_suite = run_suite(result.spec, baseline_adapter)
-    current_suite = run_suite(result.spec, current_adapter)
+    baseline_suite = run_suite(result.spec, baseline_adapter, sample=1)
+    current_suite = run_suite(result.spec, current_adapter, sample=1)
 
     reg = check_regression(baseline_suite, current_suite, tolerances={"avg_turns": 2})
     assert not reg.ok
@@ -60,8 +60,8 @@ def test_check_regression_ok_within_tolerance():
     baseline_adapter = MockAdapter(trajectories_by_input={case.input: _trajectory(case.input, turns=3)})
     current_adapter = MockAdapter(trajectories_by_input={case.input: _trajectory(case.input, turns=4)})
 
-    baseline_suite = run_suite(result.spec, baseline_adapter)
-    current_suite = run_suite(result.spec, current_adapter)
+    baseline_suite = run_suite(result.spec, baseline_adapter, sample=1)
+    current_suite = run_suite(result.spec, current_adapter, sample=1)
 
     reg = check_regression(baseline_suite, current_suite, tolerances={"avg_turns": 2})
     assert reg.ok

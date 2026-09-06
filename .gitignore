@@ -1,6 +1,6 @@
 __pycache__/
 *.pyc
 .venv/
-.harness/runs/
+.harness/
 .env
 *.egg-info/

@@ -1,0 +1,1 @@
+{"id": "elevation-lookup", "input": "What is the tallest mountain in Africa?", "target": "Kilimanjaro", "expected_tools": ["search"], "max_turns": 6}

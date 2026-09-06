@@ -15,6 +15,7 @@ from pathlib import Path
 
 from harnesskit.format.spec import PackagingConfig
 from harnesskit.parser import load_harness
+from harnesskit.trace import load_baseline
 
 BUNDLE_FORMAT_VERSION = 1
 
@@ -70,9 +71,34 @@ class BundleResult:
     file_count: int
     required_mcp_servers: list[str]
     required_adapters: list[str]
+    eval_summary: dict | None = None
 
 
-def export_bundle(harness_dir: Path, output_path: Path) -> BundleResult:
+def _self_reported_eval_summary(harness_dir: Path, spec, baseline_name: str) -> dict:
+    """A harness's own eval results, embedded on export so a consumer can see
+    something before adopting it (issue #1) — explicitly labeled as
+    self-reported and unverified. This is NOT a benchmark result: it's
+    whatever the harness author's own eval.cases happened to score against
+    whatever adapter/model they ran locally. harnesskit has no mechanism to
+    verify it and never will (design doc §13 — no gatekept task suite)."""
+    from harnesskit.eval import replay_suite
+
+    trajectories = load_baseline(harness_dir, baseline_name)
+    suite = replay_suite(spec, trajectories)
+    return {
+        "self_reported": True,
+        "verified_by": None,
+        "note": "Scored by the harness author's own eval.cases, replayed from a locally saved baseline. "
+                "Not independently verified — treat as a claim, not a benchmark result.",
+        "baseline_name": baseline_name,
+        "case_count": len(suite.results),
+        "pass_rate": suite.pass_rate,
+        "avg_turns": suite.avg_turns,
+        "avg_cost_usd": suite.avg_cost_usd,
+    }
+
+
+def export_bundle(harness_dir: Path, output_path: Path, include_eval_summary: str | None = None) -> BundleResult:
     result = load_harness(harness_dir)
     spec = result.spec
 
@@ -91,6 +117,8 @@ def export_bundle(harness_dir: Path, output_path: Path) -> BundleResult:
         "required_model_providers": [spec.model.provider],
         "checksums": checksums,
     }
+    if include_eval_summary:
+        manifest["eval_summary"] = _self_reported_eval_summary(harness_dir, spec, include_eval_summary)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(output_path, "w", zipfile.ZIP_DEFLATED) as zf:
@@ -103,6 +131,7 @@ def export_bundle(harness_dir: Path, output_path: Path) -> BundleResult:
         file_count=len(files),
         required_mcp_servers=required_mcp,
         required_adapters=manifest["required_adapters"],
+        eval_summary=manifest.get("eval_summary"),
     )
 
 

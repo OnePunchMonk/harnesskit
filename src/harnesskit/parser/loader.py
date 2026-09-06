@@ -7,6 +7,7 @@ Responsibilities (design doc §3):
 """
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -24,6 +25,26 @@ class HarnessLoadError(Exception):
 class LoadResult:
     spec: HarnessSpec
     warnings: list[str] = field(default_factory=list)
+
+
+def _load_cases_jsonl(path: Path) -> list[dict]:
+    """Load external eval cases from JSONL — the bring-your-own-benchmark
+    path (design doc §2.5: 'Inspect-compatible where possible'). Each line
+    is an EvalCase-shaped object; Inspect's own sample field names (`input`,
+    `target`) are accepted directly so an existing Inspect dataset needs
+    only a rename of `target` to work, not a rewrite.
+    """
+    cases = []
+    for i, line in enumerate(path.read_text().splitlines()):
+        line = line.strip()
+        if not line:
+            continue
+        row = json.loads(line)
+        if "target" in row and "ground_truth" not in row:
+            row["ground_truth"] = row.pop("target")
+        row.setdefault("id", f"{path.stem}-{i}")
+        cases.append(row)
+    return cases
 
 
 def load_harness(directory: str | Path) -> LoadResult:
@@ -53,7 +74,17 @@ def load_harness(directory: str | Path) -> LoadResult:
             raise HarnessLoadError(f"scaffold.system_prompt file not found: {prompt_path}")
     raw["scaffold"] = scaffold
 
-    if not raw.get("eval", {}).get("cases") and not raw.get("eval", {}).get("cases_file"):
+    eval_cfg = raw.get("eval", {})
+    cases_file = eval_cfg.get("cases_file")
+    if cases_file:
+        cases_path = directory / cases_file
+        if not cases_path.exists():
+            raise HarnessLoadError(f"eval.cases_file not found: {cases_path}")
+        loaded_cases = _load_cases_jsonl(cases_path)
+        eval_cfg = {**eval_cfg, "cases": [*eval_cfg.get("cases", []), *loaded_cases]}
+        raw["eval"] = eval_cfg
+
+    if not raw.get("eval", {}).get("cases"):
         warnings.append("No eval cases defined — `harness eval` will have nothing to run yet.")
 
     try:

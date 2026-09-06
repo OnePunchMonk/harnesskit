@@ -46,7 +46,7 @@ def test_run_suite_passes_on_good_trajectory():
     result = load_harness(EXAMPLE)
     case = result.spec.eval.cases[0]
     adapter = MockAdapter(trajectories_by_input={case.input: _good_trajectory(case.input)})
-    suite = run_suite(result.spec, adapter)
+    suite = run_suite(result.spec, adapter, sample=1)
     assert suite.pass_rate == 1.0
     assert suite.results[0].trajectory.duplicate_tool_calls == 0
 
@@ -55,7 +55,7 @@ def test_run_suite_fails_and_flags_duplicates_on_looping_trajectory():
     result = load_harness(EXAMPLE)
     case = result.spec.eval.cases[0]
     adapter = MockAdapter(trajectories_by_input={case.input: _looping_trajectory(case.input)})
-    suite = run_suite(result.spec, adapter)
+    suite = run_suite(result.spec, adapter, sample=1)
     assert suite.pass_rate == 0.0
     assert suite.results[0].trajectory.duplicate_tool_calls == 3
 
@@ -67,8 +67,8 @@ def test_compare_reports_pass_rate_delta():
     good_adapter = MockAdapter(trajectories_by_input={case.input: _good_trajectory(case.input)})
     bad_adapter = MockAdapter(trajectories_by_input={case.input: _looping_trajectory(case.input)})
 
-    suite_a = run_suite(result.spec, bad_adapter)
-    suite_b = run_suite(result.spec, good_adapter)
+    suite_a = run_suite(result.spec, bad_adapter, sample=1)
+    suite_b = run_suite(result.spec, good_adapter, sample=1)
     ab_result = compare(suite_a, suite_b)
 
     pass_rate_delta = next(d for d in ab_result.deltas if d.metric == "pass_rate")
