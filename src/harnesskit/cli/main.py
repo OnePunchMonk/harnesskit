@@ -6,8 +6,11 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
+from harnesskit.adapters import RawAPIAdapter
+from harnesskit.eval import check_regression, compare, run_suite
 from harnesskit.linter import Severity, lint
 from harnesskit.parser import HarnessLoadError, load_harness
+from harnesskit.trace import save_trajectory
 
 app = typer.Typer(no_args_is_help=True, help="harnesskit: infrastructure for building agent harnesses")
 console = Console()
@@ -122,31 +125,120 @@ scaffold:
     console.print("  Next: edit tools, add eval cases, then run `harness lint .`")
 
 
+def _fail(message: str, verbose: bool, exc: Exception | None = None) -> None:
+    console.print(f"[red]✗[/red] {message}")
+    if verbose and exc is not None:
+        console.print_exception()
+    raise typer.Exit(1)
+
+
 @app.command()
 def run(
     directory: Path = typer.Argument(Path(".")),
     input: str = typer.Option(..., "--input", help="Task to run the harness on"),
+    verbose: bool = typer.Option(False, "--verbose"),
 ) -> None:
-    """Execute the harness on a single input (requires an adapter — not yet wired up)."""
-    console.print("[yellow]not yet implemented[/yellow]: requires an Adapter (see adapters/ module).")
-    raise typer.Exit(2)
+    """Execute the harness on a single input via the raw-API adapter."""
+    try:
+        result = load_harness(directory)
+    except HarnessLoadError as e:
+        console.print(f"[red]✗[/red] {e}")
+        raise typer.Exit(1)
+
+    adapter = RawAPIAdapter()
+    try:
+        agent = adapter.build(result.spec)
+        trajectory = adapter.run(agent, input)
+    except ImportError as e:
+        _fail(str(e), verbose, e)
+    except Exception as e:  # noqa: BLE001 — provider/auth errors surfaced concisely by default
+        _fail(f"Adapter run failed: {e}", verbose, e)
+    path = save_trajectory(directory, trajectory)
+
+    console.print(f"[bold]stopped:[/bold] {trajectory.stopped_reason}  "
+                  f"[bold]turns:[/bold] {trajectory.turns}  "
+                  f"[bold]cost:[/bold] ${trajectory.total_cost_usd:.4f}")
+    console.print(f"\n{trajectory.final_output or '(no final output)'}")
+    console.print(f"\n[dim]trace saved to {path}[/dim]")
 
 
 @app.command()
-def eval_cmd(directory: Path = typer.Argument(Path("."))) -> None:
-    """Run the harness against its eval suite (requires an adapter — not yet wired up)."""
-    console.print("[yellow]not yet implemented[/yellow]: requires the Eval Engine + an Adapter.")
-    raise typer.Exit(2)
+def eval_cmd(
+    directory: Path = typer.Argument(Path(".")),
+    sample: int = typer.Option(None, "--sample", help="Run only the first N cases"),
+    verbose: bool = typer.Option(False, "--verbose"),
+) -> None:
+    """Run the harness against its eval suite via the raw-API adapter."""
+    try:
+        result = load_harness(directory)
+    except HarnessLoadError as e:
+        console.print(f"[red]✗[/red] {e}")
+        raise typer.Exit(1)
+    if not result.spec.eval.cases:
+        console.print("[yellow]No eval cases defined in this harness.[/yellow]")
+        raise typer.Exit(1)
+
+    try:
+        suite = run_suite(result.spec, RawAPIAdapter(), sample=sample)
+    except ImportError as e:
+        _fail(str(e), verbose, e)
+    except Exception as e:  # noqa: BLE001 — provider/auth errors surfaced concisely by default
+        _fail(f"Adapter run failed: {e}", verbose, e)
+    for r in suite.results:
+        save_trajectory(directory, r.trajectory, run_id=r.case.id)
+
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("case")
+    table.add_column("pass")
+    table.add_column("turns")
+    table.add_column("cost")
+    table.add_column("scores")
+    for r in suite.results:
+        mark = "[green]✓[/green]" if r.passed else "[red]✗[/red]"
+        score_str = ", ".join(f"{s.name}={s.value:.2f}" for s in r.scores if not s.passed) or "all pass"
+        table.add_row(r.case.id, mark, str(r.trajectory.turns), f"${r.trajectory.total_cost_usd:.4f}", score_str)
+    console.print(table)
+    console.print(
+        f"\npass_rate={suite.pass_rate:.2f}  avg_turns={suite.avg_turns:.1f}  "
+        f"avg_cost=${suite.avg_cost_usd:.4f}  dup_tool_calls={suite.total_duplicate_tool_calls}"
+    )
+    if suite.pass_rate < 1.0:
+        raise typer.Exit(1)
 
 
 app.command(name="eval")(eval_cmd)
 
 
 @app.command()
-def ab(dir1: Path, dir2: Path) -> None:
+def ab(dir1: Path, dir2: Path, sample: int = typer.Option(None, "--sample"), verbose: bool = typer.Option(False, "--verbose")) -> None:
     """A/B two harness versions on the same eval suite."""
-    console.print("[yellow]not yet implemented[/yellow]")
-    raise typer.Exit(2)
+    try:
+        r1, r2 = load_harness(dir1), load_harness(dir2)
+    except HarnessLoadError as e:
+        console.print(f"[red]✗[/red] {e}")
+        raise typer.Exit(1)
+
+    adapter = RawAPIAdapter()
+    try:
+        suite_a = run_suite(r1.spec, adapter, sample=sample)
+        suite_b = run_suite(r2.spec, adapter, sample=sample)
+    except ImportError as e:
+        _fail(str(e), verbose, e)
+    except Exception as e:  # noqa: BLE001 — provider/auth errors surfaced concisely by default
+        _fail(f"Adapter run failed: {e}", verbose, e)
+    result = compare(suite_a, suite_b)
+
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("metric")
+    table.add_column(result.name_a)
+    table.add_column(result.name_b)
+    table.add_column("Δ")
+    for d in result.deltas:
+        sign = "+" if d.delta >= 0 else ""
+        table.add_row(d.metric, f"{d.a:.3f}", f"{d.b:.3f}", f"{sign}{d.delta:.3f}")
+    console.print(table)
+    lo, hi = result.pass_rate_ci
+    console.print(f"\n95% CI on pass_rate delta: [{lo:+.2f}, {hi:+.2f}]  (n={len(suite_a.results)}, bootstrap)")
 
 
 @app.command()

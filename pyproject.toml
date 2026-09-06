@@ -10,6 +10,9 @@ dependencies = [
     "rich>=13.7",
 ]
 
+[project.optional-dependencies]
+anthropic = ["anthropic>=0.40"]
+
 [project.scripts]
 harness = "harnesskit.cli.main:app"
 
