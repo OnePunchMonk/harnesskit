@@ -15,8 +15,10 @@ Two scope questions are tracked as issues rather than settled in code:
 All seven components from the design doc have a working first version:
 format (M1), parser + linter (M2), trace collector + eval engine (M3), two
 adapters — raw-API and Pydantic AI v2 (M4), the NL-spec scaffolder (M5), and
-CLI polish — watch mode, `.harn` export/import (M6). The base suite runs
-offline; provider-adapter build checks run only with their optional extras.
+CLI polish — watch mode, `.harn` export/import (M6). Eval comparisons are
+case-paired and reject mismatched suites, so baselines cannot silently compare
+different benchmarks. The base suite runs offline; provider-adapter build
+checks run only with their optional extras.
 
 ## Try it
 

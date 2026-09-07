@@ -98,17 +98,51 @@ class ABResult:
     pass_rate_ci: tuple[float, float]  # 95% bootstrap CI on (b.pass_rate - a.pass_rate)
 
 
+class SuiteComparisonError(ValueError):
+    """Raised when two eval results cannot support a case-level comparison."""
+
+
+def _results_by_case_id(suite: SuiteResult) -> dict[str, CaseResult]:
+    results = {result.case.id: result for result in suite.results}
+    if len(results) != len(suite.results):
+        raise SuiteComparisonError(
+            f"{suite.harness_name} contains duplicate eval case IDs; comparisons require unique IDs"
+        )
+    return results
+
+
+def _paired_results(a: SuiteResult, b: SuiteResult) -> list[tuple[CaseResult, CaseResult]]:
+    """Return results aligned by case ID, rejecting partial or duplicate suites.
+
+    Aggregate metrics can make a comparison of different case sets look valid.
+    Requiring the same IDs makes both A/B confidence intervals and regression
+    gates reflect changes to the harness rather than changes to the benchmark.
+    """
+    a_by_id = _results_by_case_id(a)
+    b_by_id = _results_by_case_id(b)
+    if a_by_id.keys() != b_by_id.keys():
+        only_a = sorted(a_by_id.keys() - b_by_id.keys())
+        only_b = sorted(b_by_id.keys() - a_by_id.keys())
+        details = []
+        if only_a:
+            details.append(f"only in {a.harness_name}: {', '.join(only_a)}")
+        if only_b:
+            details.append(f"only in {b.harness_name}: {', '.join(only_b)}")
+        raise SuiteComparisonError("eval suites must contain the same case IDs (" + "; ".join(details) + ")")
+    return [(result, b_by_id[result.case.id]) for result in a.results]
+
+
 def _bootstrap_pass_rate_delta_ci(a: SuiteResult, b: SuiteResult, n_resamples: int = 2000, seed: int = 0) -> tuple[float, float]:
     rng = random.Random(seed)
-    a_outcomes = [1.0 if r.passed else 0.0 for r in a.results]
-    b_outcomes = [1.0 if r.passed else 0.0 for r in b.results]
-    if not a_outcomes or not b_outcomes:
+    pairs = _paired_results(a, b)
+    if not pairs:
         return (0.0, 0.0)
+    # Resample case-level deltas, not each suite independently. Independent
+    # sampling destroys the within-case pairing and overstates uncertainty.
+    outcome_deltas = [float(current.passed) - float(baseline.passed) for baseline, current in pairs]
     deltas = []
     for _ in range(n_resamples):
-        a_sample = [rng.choice(a_outcomes) for _ in a_outcomes]
-        b_sample = [rng.choice(b_outcomes) for _ in b_outcomes]
-        deltas.append(statistics.mean(b_sample) - statistics.mean(a_sample))
+        deltas.append(statistics.mean(rng.choice(outcome_deltas) for _ in outcome_deltas))
     deltas.sort()
     lo = deltas[int(0.025 * n_resamples)]
     hi = deltas[int(0.975 * n_resamples)]
@@ -119,6 +153,7 @@ def compare(a: SuiteResult, b: SuiteResult) -> ABResult:
     """Paired A/B comparison (design doc §5.4): same metrics, both directions,
     with a bootstrap confidence interval on the pass-rate delta since eval
     suites are typically small-N."""
+    _paired_results(a, b)
     deltas = [
         MetricDelta("pass_rate", a.pass_rate, b.pass_rate),
         MetricDelta("avg_turns", a.avg_turns, b.avg_turns),

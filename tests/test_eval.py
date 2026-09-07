@@ -1,6 +1,8 @@
 from pathlib import Path
 
-from harnesskit.eval import compare, run_suite
+from harnesskit.eval import CaseResult, SuiteComparisonError, SuiteResult, compare, run_suite
+from harnesskit.eval.scorers import Score
+from harnesskit.format.spec import EvalCase
 from harnesskit.eval.mock_adapter import MockAdapter
 from harnesskit.parser import load_harness
 from harnesskit.trace.schema import Step, StepType, Trajectory
@@ -73,3 +75,39 @@ def test_compare_reports_pass_rate_delta():
 
     pass_rate_delta = next(d for d in ab_result.deltas if d.metric == "pass_rate")
     assert pass_rate_delta.delta == 1.0
+
+
+def _suite_with_outcomes(name: str, outcomes: list[bool]) -> SuiteResult:
+    trajectory = _good_trajectory("input")
+    return SuiteResult(
+        harness_name=name,
+        results=[
+            CaseResult(
+                case=EvalCase(id=f"case-{index}", input="input"),
+                trajectory=trajectory,
+                scores=[Score("test", float(passed), passed, "test")],
+            )
+            for index, passed in enumerate(outcomes)
+        ],
+    )
+
+
+def test_compare_bootstraps_paired_case_outcomes():
+    # The outcomes are identical for every case. A paired bootstrap has zero
+    # uncertainty even though independent resampling would report a wide CI.
+    baseline = _suite_with_outcomes("baseline", [False, False, True, True])
+    current = _suite_with_outcomes("current", [False, False, True, True])
+
+    assert compare(baseline, current).pass_rate_ci == (0.0, 0.0)
+
+
+def test_compare_rejects_mismatched_case_sets():
+    baseline = _suite_with_outcomes("baseline", [True])
+    current = _suite_with_outcomes("current", [True, True])
+
+    try:
+        compare(baseline, current)
+    except SuiteComparisonError as error:
+        assert "same case IDs" in str(error)
+    else:
+        raise AssertionError("expected mismatched suites to be rejected")
