@@ -255,7 +255,10 @@ def eval_cmd(
     table.add_column("scores")
     for r in suite.results:
         mark = "[green]✓[/green]" if r.passed else "[red]✗[/red]"
-        score_str = ", ".join(f"{s.name}={s.value:.2f}" for s in r.scores if not s.passed) or "all pass"
+        if not r.is_scored:
+            score_str = "unscored: add an outcome, trajectory, or budget assertion"
+        else:
+            score_str = ", ".join(f"{s.name}={s.value:.2f}" for s in r.scores if not s.passed) or "all pass"
         table.add_row(r.case.id, mark, str(r.trajectory.turns), f"${r.trajectory.total_cost_usd:.4f}", score_str)
     console.print(table)
     console.print(

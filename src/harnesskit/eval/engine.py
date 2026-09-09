@@ -9,7 +9,7 @@ import statistics
 from dataclasses import dataclass, field
 
 from harnesskit.adapters.base import HarnessAdapter
-from harnesskit.eval.scorers import Score, score_trajectory
+from harnesskit.eval.scorers import Score, score_trajectory, validate_scoring_mode
 from harnesskit.format.spec import EvalCase, HarnessSpec
 from harnesskit.trace.schema import Trajectory
 
@@ -22,7 +22,11 @@ class CaseResult:
 
     @property
     def passed(self) -> bool:
-        return all(s.passed for s in self.scores)
+        return bool(self.scores) and all(s.passed for s in self.scores)
+
+    @property
+    def is_scored(self) -> bool:
+        return bool(self.scores)
 
     @property
     def mean_score(self) -> float:
@@ -62,6 +66,8 @@ def run_suite(spec: HarnessSpec, adapter: HarnessAdapter, sample: int | None = N
     cases = spec.eval.cases
     if sample is not None:
         cases = cases[:sample]
+    for case in cases:
+        validate_scoring_mode(case)
     agent = adapter.build(spec)
     results = [run_case(spec, case, adapter, agent) for case in cases]
     return SuiteResult(harness_name=spec.metadata.name, results=results)

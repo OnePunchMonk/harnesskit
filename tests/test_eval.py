@@ -1,8 +1,10 @@
 from pathlib import Path
 
+import pytest
+
 from harnesskit.eval import CaseResult, SuiteComparisonError, SuiteResult, compare, run_suite
-from harnesskit.eval.scorers import Score
-from harnesskit.format.spec import EvalCase
+from harnesskit.eval.scorers import Score, UnsupportedScoringModeError, score_trajectory
+from harnesskit.format.spec import EvalCase, ScoringMode
 from harnesskit.eval.mock_adapter import MockAdapter
 from harnesskit.parser import load_harness
 from harnesskit.trace.schema import Step, StepType, Trajectory
@@ -111,3 +113,44 @@ def test_compare_rejects_mismatched_case_sets():
         assert "same case IDs" in str(error)
     else:
         raise AssertionError("expected mismatched suites to be rejected")
+
+
+def test_exact_match_uses_ground_truth_and_rejects_wrong_output():
+    case = EvalCase(id="exact", input="input", ground_truth="expected", scoring_mode=ScoringMode.exact_match)
+    trajectory = _good_trajectory("input")
+    trajectory.final_output = "wrong"
+
+    scores = score_trajectory(trajectory, case)
+    assert next(score for score in scores if score.name == "exact_output").passed is False
+    assert CaseResult(case=case, trajectory=trajectory, scores=scores).passed is False
+
+
+def test_assertion_free_case_is_unscored_and_cannot_pass():
+    case = EvalCase(id="unscored", input="input")
+    result = CaseResult(case=case, trajectory=_good_trajectory("input"), scores=score_trajectory(_good_trajectory("input"), case))
+
+    assert result.is_scored is False
+    assert result.passed is False
+
+
+@pytest.mark.parametrize("mode", [ScoringMode.semantic_match, ScoringMode.llm_judge])
+def test_external_judge_modes_fail_before_execution(mode):
+    case = EvalCase(id="judge", input="input", ground_truth="expected", scoring_mode=mode)
+
+    with pytest.raises(UnsupportedScoringModeError, match="not implemented"):
+        score_trajectory(_good_trajectory("input"), case)
+
+
+@pytest.mark.parametrize("mode", [ScoringMode.semantic_match, ScoringMode.llm_judge])
+def test_run_suite_rejects_external_judge_before_building_adapter(mode):
+    result = load_harness(EXAMPLE)
+    result.spec.eval.cases = [
+        EvalCase(id="judge", input="input", ground_truth="expected", scoring_mode=mode),
+    ]
+
+    class AdapterThatMustNotBuild:
+        def build(self, spec):
+            raise AssertionError("adapter build must not run")
+
+    with pytest.raises(UnsupportedScoringModeError, match="not implemented"):
+        run_suite(result.spec, AdapterThatMustNotBuild())

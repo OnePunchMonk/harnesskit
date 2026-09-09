@@ -10,7 +10,7 @@ from harnesskit.eval.engine import (
     replay_suite,
     run_suite,
 )
-from harnesskit.eval.scorers import Score, score_trajectory
+from harnesskit.eval.scorers import Score, UnsupportedScoringModeError, score_trajectory
 
 __all__ = [
     "run_suite",
@@ -24,5 +24,6 @@ __all__ = [
     "RegressionResult",
     "SuiteComparisonError",
     "Score",
+    "UnsupportedScoringModeError",
     "score_trajectory",
 ]
