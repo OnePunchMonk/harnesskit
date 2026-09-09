@@ -3,13 +3,14 @@ from harnesskit.eval.engine import (
     CaseResult,
     MetricDelta,
     RegressionResult,
+    SuiteComparisonError,
     SuiteResult,
     check_regression,
     compare,
     replay_suite,
     run_suite,
 )
-from harnesskit.eval.scorers import Score, score_trajectory
+from harnesskit.eval.scorers import Score, UnsupportedScoringModeError, score_trajectory
 
 __all__ = [
     "run_suite",
@@ -21,6 +22,8 @@ __all__ = [
     "ABResult",
     "MetricDelta",
     "RegressionResult",
+    "SuiteComparisonError",
     "Score",
+    "UnsupportedScoringModeError",
     "score_trajectory",
 ]

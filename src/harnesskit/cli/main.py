@@ -7,7 +7,7 @@ from rich.console import Console
 from rich.table import Table
 
 from harnesskit.adapters import ADAPTERS, check_support
-from harnesskit.eval import SuiteResult, check_regression, compare, run_suite
+from harnesskit.eval import SuiteComparisonError, SuiteResult, check_regression, compare, run_suite
 from harnesskit.eval.engine import CaseResult
 from harnesskit.eval.scorers import score_trajectory
 from harnesskit.linter import Severity, lint
@@ -255,7 +255,10 @@ def eval_cmd(
     table.add_column("scores")
     for r in suite.results:
         mark = "[green]✓[/green]" if r.passed else "[red]✗[/red]"
-        score_str = ", ".join(f"{s.name}={s.value:.2f}" for s in r.scores if not s.passed) or "all pass"
+        if not r.is_scored:
+            score_str = "unscored: add an outcome, trajectory, or budget assertion"
+        else:
+            score_str = ", ".join(f"{s.name}={s.value:.2f}" for s in r.scores if not s.passed) or "all pass"
         table.add_row(r.case.id, mark, str(r.trajectory.turns), f"${r.trajectory.total_cost_usd:.4f}", score_str)
     console.print(table)
     console.print(
@@ -275,20 +278,31 @@ def eval_cmd(
             console.print(f"[red]✗[/red] {e}" + (f" (available: {', '.join(available)})" if available else ""))
             raise typer.Exit(1)
 
+        current_cases = [case_result.case for case_result in suite.results]
+        missing_case_ids = [case.id for case in current_cases if case.id not in baseline_trajectories]
+        if missing_case_ids:
+            console.print(
+                f"[red]✗[/red] Baseline '{compare_baseline}' is missing eval case(s): {', '.join(missing_case_ids)}. "
+                "Save a new baseline before comparing."
+            )
+            raise typer.Exit(1)
         baseline_results = [
-            CaseResult(case=c, trajectory=baseline_trajectories[c.id], scores=score_trajectory(baseline_trajectories[c.id], c))
-            for c in result.spec.eval.cases
-            if c.id in baseline_trajectories
+            CaseResult(case=case, trajectory=baseline_trajectories[case.id], scores=score_trajectory(baseline_trajectories[case.id], case))
+            for case in current_cases
         ]
         baseline_suite = SuiteResult(harness_name=f"{result.spec.metadata.name}@{compare_baseline}", results=baseline_results)
 
-        reg = check_regression(baseline_suite, suite, result.spec.eval.thresholds)
+        try:
+            reg = check_regression(baseline_suite, suite, result.spec.eval.thresholds)
+            ab = compare(baseline_suite, suite)
+        except SuiteComparisonError as e:
+            console.print(f"[red]✗[/red] Cannot compare baseline: {e}")
+            raise typer.Exit(1)
         ab_table = Table(show_header=True, header_style="bold", title=f"vs baseline '{compare_baseline}'")
         ab_table.add_column("metric")
         ab_table.add_column("baseline")
         ab_table.add_column("current")
         ab_table.add_column("Δ")
-        ab = compare(baseline_suite, suite)
         for d in ab.deltas:
             sign = "+" if d.delta >= 0 else ""
             ab_table.add_row(d.metric, f"{d.a:.3f}", f"{d.b:.3f}", f"{sign}{d.delta:.3f}")
@@ -331,7 +345,11 @@ def ab(
         _fail(str(e), verbose, e)
     except Exception as e:  # noqa: BLE001 — provider/auth errors surfaced concisely by default
         _fail(f"Adapter run failed: {e}", verbose, e)
-    result = compare(suite_a, suite_b)
+    try:
+        result = compare(suite_a, suite_b)
+    except SuiteComparisonError as e:
+        console.print(f"[red]✗[/red] Cannot run A/B comparison: {e}")
+        raise typer.Exit(1)
 
     table = Table(show_header=True, header_style="bold")
     table.add_column("metric")

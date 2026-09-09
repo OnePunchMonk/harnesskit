@@ -1,5 +1,6 @@
-import os
 from pathlib import Path
+
+import pytest
 
 from harnesskit.adapters import PydanticAIAdapter, RawAPIAdapter, check_support
 from harnesskit.parser import load_harness
@@ -28,6 +29,7 @@ def test_check_support_clean_for_default_example():
 
 
 def test_pydantic_ai_adapter_builds_with_example_tools(monkeypatch):
+    pytest.importorskip("pydantic_ai")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "dummy-for-build-only")
     result = load_harness(EXAMPLE)
     adapter = PydanticAIAdapter()
@@ -35,9 +37,10 @@ def test_pydantic_ai_adapter_builds_with_example_tools(monkeypatch):
     assert agent.handle is not None
 
 
-def test_raw_api_adapter_loads_tool_callbacks():
+def test_raw_api_adapter_loads_tool_callbacks(monkeypatch):
+    pytest.importorskip("anthropic")
     result = load_harness(EXAMPLE)
-    os.environ.setdefault("ANTHROPIC_API_KEY", "dummy-for-build-only")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "dummy-for-build-only")
     adapter = RawAPIAdapter()
     agent = adapter.build(result.spec)
     assert set(agent.handle["callbacks"]) == {"search", "verify_citation"}

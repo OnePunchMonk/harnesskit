@@ -121,8 +121,8 @@ branch must be integrated or explicitly stacked before dependent work starts.
 
 | ID | Task | Depends on | Status | Branch / evidence |
 |---|---|---|---|---|
-| HK-01 | Baseline verification and offline CI | — | TODO | |
-| HK-02 | Scoring correctness and paired comparisons | HK-01 | TODO | Inspect `7255ad9` first |
+| HK-01 | Baseline verification and offline CI | — | DONE | `feat/hk-01-baseline-ci`: Python 3.12 clean base install: 26 passed, 2 optional-adapter tests skipped; full local environment: 28 passed |
+| HK-02 | Scoring correctness and paired comparisons | HK-01 | DONE | `feat/hk-01-baseline-ci`: paired case-ID comparison; exact ground-truth scoring; assertion-free cases unscored; judge modes rejected pre-build; 36 tests passed |
 | HK-03 | Structured capabilities and strict preflight | HK-01 | TODO | Issue #6 |
 | HK-04 | Immutable run manifests and storage | HK-02 | TODO | |
 | HK-05 | Offline replay CLI and fixture demo | HK-02, HK-04 | TODO | Issue #5 |
@@ -153,6 +153,11 @@ Accept when base installation/import and offline tests work without keys/network
 optional integration jobs are separately identified; existing failures and test
 commands are recorded. Do not mask failures with broad exception handling/skips.
 
+Completion evidence: base `.[dev]` install on Python 3.12 passed without the
+Anthropic or Pydantic AI SDKs (`26 passed, 2 skipped`); the installed optional
+adapter environment passed all 28 tests. `.github/workflows/ci.yml` runs the
+base suite on Python 3.10 and 3.12 and optional adapter builds separately.
+
 ### HK-02 — Scoring correctness and paired comparisons
 
 Inspect the existing paired-comparison patch first. Define applicable scorers,
@@ -162,6 +167,12 @@ semantics. Implement supported scoring modes or reject unsupported ones clearly.
 Accept when assertion-free cases are unscored, wrong task outputs fail, reordered
 paired cases compare correctly, missing/duplicate/incompatible cases are handled
 explicitly, and bootstrap resampling preserves pairing. Test CLI and library gates.
+
+Completion evidence: integrated the prior paired-comparison patch and added
+ground-truth exact-match, assertion-free, and unsupported-judge regressions.
+The suite rejects unsupported judge modes before adapter construction and the
+CLI labels assertion-free cases as unscored. Local Python 3.12 validation:
+`36 passed`.
 
 ### HK-03 — Structured capabilities and strict preflight
 

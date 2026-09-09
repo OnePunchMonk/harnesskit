@@ -15,13 +15,24 @@ Two scope questions are tracked as issues rather than settled in code:
 All seven components from the design doc have a working first version:
 format (M1), parser + linter (M2), trace collector + eval engine (M3), two
 adapters — raw-API and Pydantic AI v2 (M4), the NL-spec scaffolder (M5), and
-CLI polish — watch mode, `.harn` export/import (M6). 23/23 tests pass.
+CLI polish — watch mode, `.harn` export/import (M6). Eval comparisons are
+case-paired and reject mismatched suites, so baselines cannot silently compare
+different benchmarks. The base suite runs offline; provider-adapter build
+checks run only with their optional extras.
 
 ## Try it
 
 ```bash
 python3.12 -m venv .venv && source .venv/bin/activate
-pip install -e ".[anthropic]"   # add [pydantic-ai] too if you want that adapter
+pip install -e ".[dev]"
+
+# Base package: fully offline, no provider SDK or credentials required.
+pytest -q
+harness lint examples/react-web-researcher
+harness inspect examples/react-web-researcher
+
+# Optional provider adapters. Install only the adapter you intend to run.
+pip install -e ".[anthropic]"   # add [pydantic-ai] for that adapter
 export ANTHROPIC_API_KEY=...
 
 harness init my-agent                              # minimal skeleton, no API call
@@ -35,9 +46,13 @@ harness eval examples/react-web-researcher --save-baseline v1
 harness eval examples/react-web-researcher --compare v1   # regression gate
 harness watch examples/react-web-researcher        # re-lint on every file change
 harness export examples/react-web-researcher -o react.harn
-harness import react.harn --directory ./react-copy
-pytest
+harness import react.harn --directory ./react-copy # all offline
 ```
+
+The base test suite skips optional-adapter build tests when their SDK is not
+installed. CI runs those tests separately with the relevant extras, so a base
+installation never needs provider packages, credentials, network access, or
+model downloads.
 
 ## Layout
 

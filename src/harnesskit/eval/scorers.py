@@ -25,6 +25,29 @@ class Score:
 Scorer = Callable[[Trajectory, EvalCase], Score]
 
 
+class UnsupportedScoringModeError(ValueError):
+    """Raised before execution for scoring modes without a configured judge."""
+
+
+def validate_scoring_mode(case: EvalCase) -> None:
+    if case.scoring_mode.value in {"semantic_match", "llm_judge"}:
+        raise UnsupportedScoringModeError(
+            f"case '{case.id}' uses scoring_mode='{case.scoring_mode.value}', which requires an external judge "
+            "and is not implemented; use exact_match or a trajectory mode"
+        )
+
+
+def has_case_assertions(case: EvalCase) -> bool:
+    """Whether a case has an outcome, trajectory, or resource assertion."""
+    return bool(
+        case.ground_truth is not None
+        or case.expected_output_contains
+        or case.expected_tools
+        or case.max_turns is not None
+        or case.max_cost_usd is not None
+    )
+
+
 def score_tool_presence(trajectory: Trajectory, case: EvalCase) -> Score:
     called = {s.tool_name for s in trajectory.tool_calls}
     expected = set(case.expected_tools)
@@ -36,15 +59,18 @@ def score_tool_presence(trajectory: Trajectory, case: EvalCase) -> Score:
 
 
 def score_trajectory_order(trajectory: Trajectory, case: EvalCase) -> Score:
-    if case.scoring_mode.value not in ("trajectory_exact", "trajectory_in_order"):
+    if case.scoring_mode.value not in ("trajectory_exact", "trajectory_in_order", "trajectory_any_order"):
         return Score("trajectory_order", 1.0, True, "not applicable to this scoring_mode")
     called_order = [s.tool_name for s in trajectory.tool_calls]
     expected = case.expected_tools
     if case.scoring_mode.value == "trajectory_exact":
         passed = called_order == expected
-    else:  # in_order: expected tools appear as a subsequence, extra calls allowed
+    elif case.scoring_mode.value == "trajectory_in_order":
+        # Expected tools appear as a subsequence; extra calls are allowed.
         it = iter(called_order)
         passed = all(t in it for t in expected)
+    else:
+        passed = set(expected).issubset(called_order)
     return Score("trajectory_order", 1.0 if passed else 0.0, passed, f"called order: {called_order}")
 
 
@@ -55,6 +81,14 @@ def score_output_contains(trajectory: Trajectory, case: EvalCase) -> Score:
     hits = [s for s in case.expected_output_contains if s in output]
     value = len(hits) / len(case.expected_output_contains)
     return Score("output_contains", value, value == 1.0, f"found {hits} of {case.expected_output_contains}")
+
+
+def score_exact_output(trajectory: Trajectory, case: EvalCase) -> Score:
+    if case.scoring_mode.value != "exact_match" or case.ground_truth is None:
+        return Score("exact_output", 1.0, True, "not applicable")
+    output = trajectory.final_output or ""
+    passed = output == case.ground_truth
+    return Score("exact_output", 1.0 if passed else 0.0, passed, "exact output match" if passed else "output differs from ground truth")
 
 
 def score_step_budget(trajectory: Trajectory, case: EvalCase) -> Score:
@@ -83,6 +117,7 @@ DETERMINISTIC_SCORERS: list[Scorer] = [
     score_tool_presence,
     score_trajectory_order,
     score_output_contains,
+    score_exact_output,
     score_step_budget,
     score_cost_budget,
     score_loop_health,
@@ -90,4 +125,7 @@ DETERMINISTIC_SCORERS: list[Scorer] = [
 
 
 def score_trajectory(trajectory: Trajectory, case: EvalCase) -> list[Score]:
+    validate_scoring_mode(case)
+    if not has_case_assertions(case):
+        return []
     return [scorer(trajectory, case) for scorer in DETERMINISTIC_SCORERS]
