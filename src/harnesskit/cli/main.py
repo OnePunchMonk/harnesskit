@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import typer
 from rich.console import Console
 from rich.table import Table
 
-from harnesskit.adapters import ADAPTERS, check_support
+from harnesskit.adapters import ADAPTERS, SupportStatus, check_support, inspect_support
 from harnesskit.eval import SuiteComparisonError, SuiteResult, check_regression, compare, run_suite
 from harnesskit.eval.engine import CaseResult
 from harnesskit.eval.scorers import score_trajectory
@@ -55,7 +56,11 @@ app.command(name="lint")(lint_cmd)
 
 
 @app.command()
-def inspect(directory: Path = typer.Argument(Path("."), help="Harness directory")) -> None:
+def inspect(
+    directory: Path = typer.Argument(Path("."), help="Harness directory"),
+    adapter_name: str | None = typer.Option(None, "--adapter", help="Inspect support for this adapter"),
+    as_json: bool = typer.Option(False, "--json", help="Emit machine-readable support findings"),
+) -> None:
     """Show a harness summary: tools, guardrails, loop strategy, eval cases."""
     try:
         result = load_harness(directory)
@@ -63,6 +68,17 @@ def inspect(directory: Path = typer.Argument(Path("."), help="Harness directory"
         console.print(f"[red]✗[/red] {e}")
         raise typer.Exit(1)
     spec = result.spec
+
+    if as_json:
+        if adapter_name is None:
+            console.print("[red]✗[/red] --json requires --adapter")
+            raise typer.Exit(1)
+        adapter_cls = ADAPTERS.get(adapter_name)
+        if adapter_cls is None:
+            console.print(f"[red]✗[/red] Unknown adapter '{adapter_name}'. Available: {', '.join(ADAPTERS)}")
+            raise typer.Exit(1)
+        console.print_json(json.dumps([finding.to_dict() for finding in inspect_support(spec, adapter_cls())]))
+        return
 
     console.print(f"[bold]{spec.metadata.name}[/bold] v{spec.metadata.version}")
     if spec.metadata.description:
@@ -73,6 +89,19 @@ def inspect(directory: Path = typer.Argument(Path("."), help="Harness directory"
     console.print(f"guardrails: {', '.join(g.name for g in spec.guardrails) or '(none)'}")
     console.print(f"termination: {', '.join(t.type for t in spec.termination) or '(none)'}")
     console.print(f"eval cases: {len(spec.eval.cases)}")
+    if adapter_name is not None:
+        adapter_cls = ADAPTERS.get(adapter_name)
+        if adapter_cls is None:
+            console.print(f"[red]✗[/red] Unknown adapter '{adapter_name}'. Available: {', '.join(ADAPTERS)}")
+            raise typer.Exit(1)
+        findings = inspect_support(spec, adapter_cls())
+        if not findings:
+            console.print(f"[green]✓[/green] All declared features are supported by {adapter_name}.")
+        else:
+            for finding in findings:
+                console.print(
+                    f"[yellow]{finding.status.value}[/yellow] {finding.field}={finding.requested}: {finding.reason}"
+                )
 
 
 @app.command()
@@ -176,13 +205,19 @@ def _fail(message: str, verbose: bool, exc: Exception | None = None) -> None:
     raise typer.Exit(1)
 
 
-def _resolve_adapter(name: str, spec) -> object:
+def _resolve_adapter(name: str, spec, *, strict: bool = False) -> object:
     adapter_cls = ADAPTERS.get(name)
     if adapter_cls is None:
         console.print(f"[red]✗[/red] Unknown adapter '{name}'. Available: {', '.join(ADAPTERS)}")
         raise typer.Exit(1)
     adapter = adapter_cls()
-    for warning in check_support(spec, adapter):
+    warnings = check_support(spec, adapter)
+    if strict and warnings:
+        console.print("[red]✗[/red] Strict preflight rejected unsupported required behavior:")
+        for warning in warnings:
+            console.print(f"  - {warning}")
+        raise typer.Exit(1)
+    for warning in warnings:
         console.print(f"[yellow]warning[/yellow]: {warning}")
     return adapter
 
@@ -192,6 +227,7 @@ def run(
     directory: Path = typer.Argument(Path(".")),
     input: str = typer.Option(..., "--input", help="Task to run the harness on"),
     adapter_name: str = typer.Option("raw_api", "--adapter", help=f"One of: {', '.join(ADAPTERS)}"),
+    strict: bool = typer.Option(False, "--strict", help="Reject unsupported declared behavior before adapter setup"),
     verbose: bool = typer.Option(False, "--verbose"),
 ) -> None:
     """Execute the harness on a single input."""
@@ -201,7 +237,7 @@ def run(
         console.print(f"[red]✗[/red] {e}")
         raise typer.Exit(1)
 
-    adapter = _resolve_adapter(adapter_name, result.spec)
+    adapter = _resolve_adapter(adapter_name, result.spec, strict=strict)
     try:
         agent = adapter.build(result.spec)
         trajectory = adapter.run(agent, input)
@@ -223,6 +259,7 @@ def eval_cmd(
     directory: Path = typer.Argument(Path(".")),
     sample: int = typer.Option(None, "--sample", help="Run only the first N cases"),
     adapter_name: str = typer.Option("raw_api", "--adapter", help=f"One of: {', '.join(ADAPTERS)}"),
+    strict: bool = typer.Option(False, "--strict", help="Reject unsupported declared behavior before adapter setup"),
     save_baseline: str = typer.Option(None, "--save-baseline", help="Snapshot this run under a name for future --compare"),
     compare_baseline: str = typer.Option(None, "--compare", help="Diff this run against a saved baseline; fail on regression"),
     verbose: bool = typer.Option(False, "--verbose"),
@@ -237,7 +274,7 @@ def eval_cmd(
         console.print("[yellow]No eval cases defined in this harness.[/yellow]")
         raise typer.Exit(1)
 
-    adapter = _resolve_adapter(adapter_name, result.spec)
+    adapter = _resolve_adapter(adapter_name, result.spec, strict=strict)
     try:
         suite = run_suite(result.spec, adapter, sample=sample)
     except ImportError as e:

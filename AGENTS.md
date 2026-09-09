@@ -123,7 +123,7 @@ branch must be integrated or explicitly stacked before dependent work starts.
 |---|---|---|---|---|
 | HK-01 | Baseline verification and offline CI | — | DONE | `feat/hk-01-baseline-ci`: Python 3.12 clean base install: 26 passed, 2 optional-adapter tests skipped; full local environment: 28 passed |
 | HK-02 | Scoring correctness and paired comparisons | HK-01 | DONE | `feat/hk-01-baseline-ci`: paired case-ID comparison; exact ground-truth scoring; assertion-free cases unscored; judge modes rejected pre-build; 36 tests passed |
-| HK-03 | Structured capabilities and strict preflight | HK-01 | TODO | Issue #6 |
+| HK-03 | Structured capabilities and strict preflight | HK-01 | DONE | `feat/hk-01-baseline-ci`: typed findings, offline JSON inspect, `--strict` preflight; 38 tests passed |
 | HK-04 | Immutable run manifests and storage | HK-02 | TODO | |
 | HK-05 | Offline replay CLI and fixture demo | HK-02, HK-04 | TODO | Issue #5 |
 | HK-06 | Scripted adapter conformance suite | HK-03 | TODO | Issue #6 |
@@ -182,6 +182,11 @@ and strict run/eval preflight. Document compatibility with existing warning mode
 
 Accept when unsupported required behavior fails before provider/tool initialization;
 inspect output identifies actual limitations; supported configurations still run.
+
+Completion evidence: `SupportFinding` includes field, requested value, status,
+reason, and runtime identity. `harness inspect --adapter NAME --json` constructs
+no provider, and strict run/eval preflight rejects unsupported features before
+adapter build. Local Python 3.12 validation: `38 passed`.
 
 ### HK-04 — Immutable run manifests and storage
 

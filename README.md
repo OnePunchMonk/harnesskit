@@ -30,6 +30,7 @@ pip install -e ".[dev]"
 pytest -q
 harness lint examples/react-web-researcher
 harness inspect examples/react-web-researcher
+harness inspect examples/react-web-researcher --adapter raw_api --json
 
 # Optional provider adapters. Install only the adapter you intend to run.
 pip install -e ".[anthropic]"   # add [pydantic-ai] for that adapter
@@ -53,6 +54,10 @@ The base test suite skips optional-adapter build tests when their SDK is not
 installed. CI runs those tests separately with the relevant extras, so a base
 installation never needs provider packages, credentials, network access, or
 model downloads.
+
+`harness run` and `harness eval` warn about unsupported adapter features by
+default for compatibility. Add `--strict` to reject them before an adapter,
+provider client, or tool callback is initialized.
 
 ## Layout
 
