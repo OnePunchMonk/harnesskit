@@ -1,0 +1,123 @@
+{
+  "capital-lookup": {
+    "harness_name": "react-web-researcher",
+    "harness_version": "0.1.0",
+    "model_id": "claude-sonnet-5",
+    "adapter": "fixture",
+    "input": "What is the capital of the country with the largest population in South America?",
+    "started_at": 1789145014.448464,
+    "steps": [
+      {
+        "step_type": "llm_call",
+        "input": null,
+        "output": "Let me search for this.",
+        "tokens_in": 180,
+        "tokens_out": 40,
+        "cost_usd": 0.0013,
+        "duration_ms": 900,
+        "tool_name": null,
+        "tool_args": null,
+        "tool_result": null,
+        "note": null
+      },
+      {
+        "step_type": "tool_call",
+        "input": null,
+        "output": null,
+        "tokens_in": 0,
+        "tokens_out": 0,
+        "cost_usd": 0.0,
+        "duration_ms": 300,
+        "tool_name": "search",
+        "tool_args": {
+          "query": "most populous country South America"
+        },
+        "tool_result": "Brazil is the most populous country in South America.",
+        "note": null
+      },
+      {
+        "step_type": "llm_call",
+        "input": null,
+        "output": "The capital of Brazil is Bras\u00edlia. <answer>Bras\u00edlia</answer>",
+        "tokens_in": 260,
+        "tokens_out": 25,
+        "cost_usd": 0.0015,
+        "duration_ms": 700,
+        "tool_name": null,
+        "tool_args": null,
+        "tool_result": null,
+        "note": null
+      }
+    ],
+    "final_output": "The capital of Brazil is Bras\u00edlia. <answer>Bras\u00edlia</answer>",
+    "stopped_reason": "tag_emitted:answer"
+  },
+  "elevation-lookup": {
+    "harness_name": "react-web-researcher",
+    "harness_version": "0.1.0",
+    "model_id": "claude-sonnet-5",
+    "adapter": "fixture",
+    "input": "What is the tallest mountain in Africa?",
+    "started_at": 1789145014.4484868,
+    "steps": [
+      {
+        "step_type": "llm_call",
+        "input": null,
+        "output": "I will search for this.",
+        "tokens_in": 150,
+        "tokens_out": 30,
+        "cost_usd": 0.001,
+        "duration_ms": 850,
+        "tool_name": null,
+        "tool_args": null,
+        "tool_result": null,
+        "note": null
+      },
+      {
+        "step_type": "tool_call",
+        "input": null,
+        "output": null,
+        "tokens_in": 0,
+        "tokens_out": 0,
+        "cost_usd": 0.0,
+        "duration_ms": 5000,
+        "tool_name": "search",
+        "tool_args": {
+          "query": "tallest mountain Africa"
+        },
+        "tool_result": "error: search backend timed out, retry",
+        "note": null
+      },
+      {
+        "step_type": "tool_call",
+        "input": null,
+        "output": null,
+        "tokens_in": 0,
+        "tokens_out": 0,
+        "cost_usd": 0.0,
+        "duration_ms": 280,
+        "tool_name": "search",
+        "tool_args": {
+          "query": "tallest mountain in Africa"
+        },
+        "tool_result": "Mount Kilimanjaro, Tanzania, ~5895m.",
+        "note": null
+      },
+      {
+        "step_type": "llm_call",
+        "input": null,
+        "output": "Mount Kilimanjaro is the tallest mountain in Africa, standing about 5,895 meters. <answer>Mount Kilimanjaro is the tallest mountain in Africa, standing about 5,895 meters.</answer>",
+        "tokens_in": 310,
+        "tokens_out": 45,
+        "cost_usd": 0.0021,
+        "duration_ms": 760,
+        "tool_name": null,
+        "tool_args": null,
+        "tool_result": null,
+        "note": null
+      }
+    ],
+    "final_output": "Mount Kilimanjaro is the tallest mountain in Africa, standing about 5,895 meters.",
+    "stopped_reason": "tag_emitted:answer"
+  }
+}

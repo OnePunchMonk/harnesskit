@@ -23,7 +23,10 @@ case-paired and reject mismatched suites, so baselines cannot silently compare
 different benchmarks. Adapters report typed capability findings, and `--strict`
 on `run`/`eval` rejects unsupported declared behavior before any provider
 client or tool callback is initialized. The base suite runs offline;
-provider-adapter build checks run only with their optional extras.
+provider-adapter build checks run only with their optional extras. `harness
+replay` re-scores a saved baseline against the current eval suite without
+constructing an adapter at all, so the example harness's fixture baseline is
+a real credential-free demo, not just a config file.
 
 ## Try it
 
@@ -36,6 +39,13 @@ pytest -q
 harness lint examples/react-web-researcher
 harness inspect examples/react-web-researcher
 harness inspect examples/react-web-researcher --adapter raw_api --json
+harness conformance                                # adapter conformance suite
+
+# Re-score a fixture baseline (see examples/react-web-researcher/eval/fixtures/):
+# no adapter, no API key, no network call. Deliberately shows one pass and one
+# understandable failure.
+harness replay examples/react-web-researcher \
+  --baseline examples/react-web-researcher/eval/fixtures/fixture-demo.baseline.json
 
 # Optional provider adapters. Install only the adapter you intend to run.
 pip install -e ".[anthropic]"   # add [pydantic-ai] for that adapter
@@ -53,7 +63,6 @@ harness eval examples/react-web-researcher --compare v1   # regression gate
 harness watch examples/react-web-researcher        # re-lint on every file change
 harness export examples/react-web-researcher -o react.harn
 harness import react.harn --directory ./react-copy # all offline
-harness conformance                                # adapter conformance suite, no API key
 ```
 
 The base test suite skips optional-adapter build tests when their SDK is not

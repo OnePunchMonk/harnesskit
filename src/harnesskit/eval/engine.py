@@ -37,6 +37,7 @@ class CaseResult:
 class SuiteResult:
     harness_name: str
     results: list[CaseResult] = field(default_factory=list)
+    missing_case_ids: list[str] = field(default_factory=list)
 
     @property
     def pass_rate(self) -> float:
@@ -75,14 +76,21 @@ def run_suite(spec: HarnessSpec, adapter: HarnessAdapter, sample: int | None = N
 
 def replay_suite(spec: HarnessSpec, trajectories: dict[str, Trajectory]) -> SuiteResult:
     """Re-score cached trajectories without calling the model again — the
-    cheapest eval mode, used when only a scorer changed (design doc §5.3)."""
+    cheapest eval mode, used when only a scorer changed (design doc §5.3).
+
+    A case with no matching trajectory is recorded in `missing_case_ids`
+    rather than silently dropped, so a caller can't mistake a partial replay
+    for a complete one (`SuiteResult.pass_rate` is computed over `results`
+    only, which — without that check — would look like a clean 100%)."""
     results = []
+    missing_case_ids = []
     for case in spec.eval.cases:
         trajectory = trajectories.get(case.id)
         if trajectory is None:
+            missing_case_ids.append(case.id)
             continue
         results.append(CaseResult(case=case, trajectory=trajectory, scores=score_trajectory(trajectory, case)))
-    return SuiteResult(harness_name=spec.metadata.name, results=results)
+    return SuiteResult(harness_name=spec.metadata.name, results=results, missing_case_ids=missing_case_ids)
 
 
 @dataclass

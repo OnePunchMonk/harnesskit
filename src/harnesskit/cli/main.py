@@ -8,13 +8,13 @@ from rich.console import Console
 from rich.table import Table
 
 from harnesskit.adapters import ADAPTERS, SupportStatus, check_support, inspect_support
-from harnesskit.eval import SuiteComparisonError, SuiteResult, check_regression, compare, run_suite
+from harnesskit.eval import SuiteComparisonError, SuiteResult, check_regression, compare, replay_suite, run_suite
 from harnesskit.eval.engine import CaseResult
 from harnesskit.eval.scorers import score_trajectory
 from harnesskit.linter import Severity, lint
 from harnesskit.packaging import export_bundle, import_bundle, preview_bundle
 from harnesskit.parser import HarnessLoadError, load_harness
-from harnesskit.trace import list_baselines, load_baseline, save_trajectory
+from harnesskit.trace import Trajectory, list_baselines, load_baseline, save_trajectory
 from harnesskit.trace import save_baseline as save_baseline_fn
 
 app = typer.Typer(no_args_is_help=True, help="harnesskit: infrastructure for building agent harnesses")
@@ -255,6 +255,30 @@ def _resolve_adapter(name: str, spec, *, strict: bool = False) -> object:
     return adapter
 
 
+def _render_suite_table(suite: SuiteResult) -> Table:
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("case")
+    table.add_column("pass")
+    table.add_column("turns")
+    table.add_column("cost")
+    table.add_column("scores")
+    for r in suite.results:
+        mark = "[green]✓[/green]" if r.passed else "[red]✗[/red]"
+        if not r.is_scored:
+            score_str = "unscored: add an outcome, trajectory, or budget assertion"
+        else:
+            score_str = ", ".join(f"{s.name}={s.value:.2f}" for s in r.scores if not s.passed) or "all pass"
+        table.add_row(r.case.id, mark, str(r.trajectory.turns), f"${r.trajectory.total_cost_usd:.4f}", score_str)
+    return table
+
+
+def _suite_summary_line(suite: SuiteResult) -> str:
+    return (
+        f"\npass_rate={suite.pass_rate:.2f}  avg_turns={suite.avg_turns:.1f}  "
+        f"avg_cost=${suite.avg_cost_usd:.4f}  dup_tool_calls={suite.total_duplicate_tool_calls}"
+    )
+
+
 @app.command()
 def run(
     directory: Path = typer.Argument(Path(".")),
@@ -317,24 +341,8 @@ def eval_cmd(
     for r in suite.results:
         save_trajectory(directory, r.trajectory, run_id=r.case.id)
 
-    table = Table(show_header=True, header_style="bold")
-    table.add_column("case")
-    table.add_column("pass")
-    table.add_column("turns")
-    table.add_column("cost")
-    table.add_column("scores")
-    for r in suite.results:
-        mark = "[green]✓[/green]" if r.passed else "[red]✗[/red]"
-        if not r.is_scored:
-            score_str = "unscored: add an outcome, trajectory, or budget assertion"
-        else:
-            score_str = ", ".join(f"{s.name}={s.value:.2f}" for s in r.scores if not s.passed) or "all pass"
-        table.add_row(r.case.id, mark, str(r.trajectory.turns), f"${r.trajectory.total_cost_usd:.4f}", score_str)
-    console.print(table)
-    console.print(
-        f"\npass_rate={suite.pass_rate:.2f}  avg_turns={suite.avg_turns:.1f}  "
-        f"avg_cost=${suite.avg_cost_usd:.4f}  dup_tool_calls={suite.total_duplicate_tool_calls}"
-    )
+    console.print(_render_suite_table(suite))
+    console.print(_suite_summary_line(suite))
 
     if save_baseline:
         path = save_baseline_fn(directory, save_baseline, {r.case.id: r.trajectory for r in suite.results})
@@ -390,6 +398,60 @@ def eval_cmd(
 
 
 app.command(name="eval")(eval_cmd)
+
+
+@app.command()
+def replay(
+    directory: Path = typer.Argument(Path(".")),
+    baseline: str = typer.Option(
+        ..., "--baseline", help="A baseline name saved via `harness eval --save-baseline`, or a path to a baseline JSON file"
+    ),
+    partial: bool = typer.Option(False, "--partial", help="Score the cases that have a trajectory even if some are missing"),
+) -> None:
+    """Re-score a saved baseline against the current eval suite — no adapter,
+    no provider client, no API key, no network call."""
+    try:
+        result = load_harness(directory)
+    except HarnessLoadError as e:
+        console.print(f"[red]✗[/red] {e}")
+        raise typer.Exit(1)
+    if not result.spec.eval.cases:
+        console.print("[yellow]No eval cases defined in this harness.[/yellow]")
+        raise typer.Exit(1)
+
+    baseline_path = Path(baseline)
+    if baseline_path.is_file():
+        trajectories = {
+            case_id: Trajectory.model_validate(data) for case_id, data in json.loads(baseline_path.read_text()).items()
+        }
+        baseline_label = str(baseline_path)
+    else:
+        try:
+            trajectories = load_baseline(directory, baseline)
+        except FileNotFoundError as e:
+            available = list_baselines(directory)
+            console.print(f"[red]✗[/red] {e}" + (f" (available: {', '.join(available)})" if available else ""))
+            raise typer.Exit(1)
+        baseline_label = baseline
+
+    suite = replay_suite(result.spec, trajectories)
+    expected = len(result.spec.eval.cases)
+    found = len(suite.results)
+    console.print(f"replaying '{baseline_label}': expected={expected}  found={found}  missing={len(suite.missing_case_ids)}")
+
+    if suite.missing_case_ids:
+        console.print(f"[yellow]missing trajectories for:[/yellow] {', '.join(suite.missing_case_ids)}")
+        if not partial:
+            console.print(
+                "[red]✗[/red] refusing to report a complete result while cases are missing; pass --partial to score what's available"
+            )
+            raise typer.Exit(1)
+
+    console.print(_render_suite_table(suite))
+    console.print(_suite_summary_line(suite))
+
+    if suite.missing_case_ids or suite.pass_rate < 1.0:
+        raise typer.Exit(1)
 
 
 @app.command()
