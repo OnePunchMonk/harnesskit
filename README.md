@@ -6,9 +6,12 @@ and eval loop for the harness (loop strategy, tools, guardrails, prompt)
 you build on top of an existing framework or the raw API.
 
 See [`harness_toolkit_design_doc.md`](./harness_toolkit_design_doc.md) for
-the full design (architecture, all 7 components, milestones, open questions).
-Two scope questions are tracked as issues rather than settled in code:
-[#1 benchmarking](../../issues/1), [#2 deployment](../../issues/2).
+the full design (architecture, all 7 components, milestones, open questions),
+and [`AGENTS.md`](./AGENTS.md) for conventions when working on the codebase
+itself. Two scope questions are tracked as issues rather than settled in
+code: [#1 benchmarking](../../issues/1), [#2 deployment](../../issues/2).
+
+Requires Python 3.10+.
 
 ## Status
 
