@@ -53,6 +53,7 @@ harness eval examples/react-web-researcher --compare v1   # regression gate
 harness watch examples/react-web-researcher        # re-lint on every file change
 harness export examples/react-web-researcher -o react.harn
 harness import react.harn --directory ./react-copy # all offline
+harness conformance                                # adapter conformance suite, no API key
 ```
 
 The base test suite skips optional-adapter build tests when their SDK is not
@@ -60,9 +61,29 @@ installed. CI runs those tests separately with the relevant extras, so a base
 installation never needs provider packages, credentials, network access, or
 model downloads.
 
+## Compatibility policy
+
+`AdapterCapabilities.supports()` is a declaration, not a proof — an adapter
+can claim to support a loop strategy or hook point and still get it wrong.
 `harness run` and `harness eval` warn about unsupported adapter features by
-default for compatibility. Add `--strict` to reject them before an adapter,
-provider client, or tool callback is initialized.
+default for compatibility; add `--strict` to reject them before an adapter,
+provider client, or tool callback is initialized, using `inspect_support()`
+findings (`harness inspect --adapter <name> --json` for the machine-readable
+form).
+
+The conformance suite in `harnesskit.testing.conformance` closes the gap
+between declaration and behavior: it runs a fixed set of deterministic
+scenarios (max-turn termination, explicit-tool/tag-emitted termination, tool
+result recording, tool exceptions, missing-callback handling, trace
+completeness) against a real `HarnessAdapter.run()`, using a scripted client
+(`harnesskit.testing.fakes.FakeAnthropicClient`) and fake tools — no API key,
+no network call. `harness conformance` runs it against the raw_api adapter
+and prints a support matrix; third-party adapter authors can import
+`RAW_API_CASES` and `run_case` directly to conformance-test their own
+adapter (see the module docstring for a minimal example). A scenario passing
+means the adapter's contract holds for that behavior; it does not mean the
+adapter's native transcript matches another adapter's byte-for-byte —
+runtimes may legitimately differ in how they get there.
 
 ## Layout
 

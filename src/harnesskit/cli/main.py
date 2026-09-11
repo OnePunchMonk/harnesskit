@@ -105,6 +105,31 @@ def inspect(
 
 
 @app.command()
+def conformance(
+    as_json: bool = typer.Option(False, "--json", help="Emit machine-readable scenario results"),
+) -> None:
+    """Run the scripted adapter conformance suite (no harness dir, no API key).
+
+    Tests that adapters actually behave the way their declared capabilities
+    claim, using scripted clients and fake tools — see `harnesskit.testing`.
+    """
+    from harnesskit.testing.conformance import RAW_API_CASES, generate_matrix, run_case
+
+    adapter = ADAPTERS["raw_api"]()
+    results = [run_case(adapter, case, runtime="raw_api") for case in RAW_API_CASES]
+
+    if as_json:
+        console.print_json(json.dumps([{"case_id": r.case_id, "runtime": r.runtime, "status": r.status, "detail": r.detail} for r in results]))
+        raise typer.Exit(0 if all(r.status == "pass" for r in results) else 1)
+
+    console.print(generate_matrix(results))
+    for r in results:
+        if r.status != "pass":
+            console.print(f"[red]✗[/red] {r.case_id} ({r.runtime}): {r.detail}")
+    raise typer.Exit(0 if all(r.status == "pass" for r in results) else 1)
+
+
+@app.command()
 def init(
     name: str = typer.Argument(None, help="Harness name (omit when using --spec; the plan names itself)"),
     spec: str = typer.Option(None, "--spec", help="Natural-language description — scaffolds via an LLM call + self-validation"),
