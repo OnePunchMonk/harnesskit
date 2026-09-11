@@ -270,6 +270,207 @@ RAW_API_CASES: list[ConformanceCase] = [
 ]
 
 
+# ---------------------------------------------------------------------------
+# pydantic_ai-shaped cases: built by constructing a real pydantic_ai.Agent
+# wired to a scripted FunctionModel and fake tool callables directly (bypassing
+# PydanticAIAdapter.build(), same as the raw_api cases bypass RawAPIAdapter.build()
+# — conformance tests run(), the execution contract, not file/client wiring).
+#
+# Several of these are *expected* to fail for PydanticAIAdapter today: its
+# module docstring already documents that mid-run termination
+# (explicit_tool/tag_emitted) isn't enforced, and pydantic-ai propagates a
+# raising tool callback as an exception rather than an error result the model
+# can see. That's the point — the matrix should show it, not hide it, and a
+# clean `supports()` declaration is not proof either behavior actually holds.
+# ---------------------------------------------------------------------------
+
+
+def _pydantic_ai_agent(fn, tools: list, *, max_turns: int = 5):
+    from pydantic_ai import Agent
+    from pydantic_ai.models.function import FunctionModel
+
+    spec = make_spec(max_turns=max_turns)
+    agent = Agent(FunctionModel(fn), tools=tools)
+    return RunnableAgent(spec=spec, handle=agent), "go"
+
+
+def _pai_build_max_turns():
+    from pydantic_ai import Tool
+    from pydantic_ai.messages import ModelResponse, ToolCallPart
+
+    def noop(**_kwargs) -> str:
+        return "ok"
+
+    def fn(_messages, _info):
+        return ModelResponse(parts=[ToolCallPart(tool_name="noop", args={})])
+
+    return _pydantic_ai_agent(fn, [Tool(function=noop, name="noop", description="")], max_turns=3)
+
+
+def _pai_check_max_turns(t: Trajectory) -> None:
+    assert t.stopped_reason == "max_turns", f"expected max_turns termination, got {t.stopped_reason!r}"
+
+
+def _pai_build_explicit_tool_termination():
+    from pydantic_ai import Tool
+    from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart
+
+    calls = {"n": 0}
+
+    def submit(**_kwargs) -> str:
+        return "recorded"
+
+    def fn(_messages, _info):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return ModelResponse(parts=[ToolCallPart(tool_name="submit", args={"answer": "42"})])
+        return ModelResponse(parts=[TextPart(content="done")])
+
+    return _pydantic_ai_agent(fn, [Tool(function=submit, name="submit", description="")])
+
+
+def _pai_check_explicit_tool_termination(t: Trajectory) -> None:
+    assert t.stopped_reason == "explicit_tool:submit", (
+        f"expected explicit_tool termination, got {t.stopped_reason!r} "
+        "(PydanticAIAdapter does not enforce mid-run explicit_tool termination — see its module docstring)"
+    )
+
+
+def _pai_build_tag_emitted_termination():
+    from pydantic_ai.messages import ModelResponse, TextPart
+
+    def fn(_messages, _info):
+        return ModelResponse(parts=[TextPart(content="finishing up <done>result</done>")])
+
+    return _pydantic_ai_agent(fn, [])
+
+
+def _pai_check_tag_emitted_termination(t: Trajectory) -> None:
+    assert t.stopped_reason == "tag_emitted:done", (
+        f"expected tag_emitted termination, got {t.stopped_reason!r} "
+        "(PydanticAIAdapter does not enforce mid-run tag_emitted termination — see its module docstring)"
+    )
+
+
+def _pai_build_tool_result_recording():
+    from pydantic_ai import Tool
+    from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart
+
+    calls = {"n": 0}
+
+    def noop(x: int = 0) -> str:
+        return f"ok:{x}"
+
+    def fn(_messages, _info):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return ModelResponse(parts=[ToolCallPart(tool_name="noop", args={"x": 1})])
+        return ModelResponse(parts=[TextPart(content="done")])
+
+    return _pydantic_ai_agent(fn, [Tool(function=noop, name="noop", description="")])
+
+
+def _pai_check_tool_result_recording(t: Trajectory) -> None:
+    calls = t.tool_calls
+    assert len(calls) == 1, f"expected exactly one tool_call step, got {len(calls)}"
+    step = calls[0]
+    assert step.tool_name == "noop"
+    assert step.tool_result is not None and "ok:" in step.tool_result
+
+
+def _pai_build_tool_exception_handling():
+    from pydantic_ai import Tool
+    from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart
+
+    calls = {"n": 0}
+
+    def fn(_messages, _info):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return ModelResponse(parts=[ToolCallPart(tool_name="flaky", args={})])
+        return ModelResponse(parts=[TextPart(content="recovered")])
+
+    return _pydantic_ai_agent(fn, [Tool(function=raising_tool("kaboom"), name="flaky", description="")])
+
+
+def _pai_check_tool_exception_handling(t: Trajectory) -> None:
+    calls = t.tool_calls
+    assert calls and calls[0].tool_result is not None and "kaboom" in calls[0].tool_result, (
+        "a raising tool callback should surface as an error result on the trace, not crash the run "
+        "(pydantic-ai currently propagates the exception out of run_sync instead)"
+    )
+
+
+def _pai_build_trace_completeness():
+    from pydantic_ai import Tool
+    from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart
+
+    calls = {"n": 0}
+
+    def noop(x: int = 0) -> str:
+        return f"ok:{x}"
+
+    def fn(_messages, _info):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return ModelResponse(parts=[ToolCallPart(tool_name="noop", args={"a": 1})])
+        return ModelResponse(parts=[TextPart(content="final answer")])
+
+    return _pydantic_ai_agent(fn, [Tool(function=noop, name="noop", description="")])
+
+
+def _pai_check_trace_completeness(t: Trajectory) -> None:
+    assert t.final_output == "final answer"
+    step_types = [s.step_type for s in t.steps]
+    assert step_types == [StepType.llm_call, StepType.tool_call, StepType.llm_call], step_types
+
+
+PYDANTIC_AI_CASES: list[ConformanceCase] = [
+    ConformanceCase(
+        "max_turn_termination",
+        "loop.max_turns",
+        "run() stops exactly at loop.max_turns and reports stopped_reason='max_turns'",
+        _pai_build_max_turns,
+        _pai_check_max_turns,
+    ),
+    ConformanceCase(
+        "explicit_tool_termination",
+        "termination.explicit_tool",
+        "calling the declared explicit-tool ends the run without executing that tool",
+        _pai_build_explicit_tool_termination,
+        _pai_check_explicit_tool_termination,
+    ),
+    ConformanceCase(
+        "tag_emitted_termination",
+        "termination.tag_emitted",
+        "emitting the declared stop tag in text ends the run",
+        _pai_build_tag_emitted_termination,
+        _pai_check_tag_emitted_termination,
+    ),
+    ConformanceCase(
+        "tool_result_recording",
+        "tools",
+        "a successful tool call's name, args, and result are all recorded on one step",
+        _pai_build_tool_result_recording,
+        _pai_check_tool_result_recording,
+    ),
+    ConformanceCase(
+        "tool_exception_handling",
+        "tools",
+        "a raising tool callback surfaces as an error result, not an uncaught exception",
+        _pai_build_tool_exception_handling,
+        _pai_check_tool_exception_handling,
+    ),
+    ConformanceCase(
+        "trace_completeness",
+        "trace",
+        "the full step sequence (llm_call, tool_call, llm_call) is present and ordered",
+        _pai_build_trace_completeness,
+        _pai_check_trace_completeness,
+    ),
+]
+
+
 def generate_matrix(results: list[ScenarioResult]) -> str:
     """Render conformance results as a markdown support matrix.
 

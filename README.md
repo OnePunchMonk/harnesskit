@@ -77,13 +77,21 @@ scenarios (max-turn termination, explicit-tool/tag-emitted termination, tool
 result recording, tool exceptions, missing-callback handling, trace
 completeness) against a real `HarnessAdapter.run()`, using a scripted client
 (`harnesskit.testing.fakes.FakeAnthropicClient`) and fake tools — no API key,
-no network call. `harness conformance` runs it against the raw_api adapter
-and prints a support matrix; third-party adapter authors can import
-`RAW_API_CASES` and `run_case` directly to conformance-test their own
+no network call. `harness conformance` runs it against both adapters (skipping
+pydantic_ai automatically when that extra isn't installed) and prints a
+support matrix; third-party adapter authors can import `RAW_API_CASES` /
+`PYDANTIC_AI_CASES` and `run_case` directly to conformance-test their own
 adapter (see the module docstring for a minimal example). A scenario passing
 means the adapter's contract holds for that behavior; it does not mean the
 adapter's native transcript matches another adapter's byte-for-byte —
 runtimes may legitimately differ in how they get there.
+
+The two adapters are not identical on this matrix, and that's the point:
+`PydanticAIAdapter` doesn't enforce mid-run `explicit_tool`/`tag_emitted`
+termination (its own module docstring says so), and pydantic-ai currently
+propagates a raising tool callback as an exception instead of an error
+result the model can see — both show up as an honest ❌/⚠️ in
+`harness conformance` rather than a silently-passing declaration.
 
 ## Layout
 

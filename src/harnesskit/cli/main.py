@@ -118,6 +118,14 @@ def conformance(
     adapter = ADAPTERS["raw_api"]()
     results = [run_case(adapter, case, runtime="raw_api") for case in RAW_API_CASES]
 
+    try:
+        from harnesskit.testing.conformance import PYDANTIC_AI_CASES
+
+        pai_adapter = ADAPTERS["pydantic_ai"]()
+        results += [run_case(pai_adapter, case, runtime="pydantic_ai") for case in PYDANTIC_AI_CASES]
+    except ImportError:
+        pass  # pydantic-ai not installed; report raw_api only
+
     if as_json:
         console.print_json(json.dumps([{"case_id": r.case_id, "runtime": r.runtime, "status": r.status, "detail": r.detail} for r in results]))
         raise typer.Exit(0 if all(r.status == "pass" for r in results) else 1)

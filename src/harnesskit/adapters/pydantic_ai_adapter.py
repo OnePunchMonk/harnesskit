@@ -67,13 +67,10 @@ class PydanticAIAdapter:
         return RunnableAgent(spec=spec, handle=agent)
 
     def run(self, agent: RunnableAgent, input: str) -> Trajectory:
+        from pydantic_ai.exceptions import UsageLimitExceeded
         from pydantic_ai.usage import UsageLimits
 
         spec = agent.spec
-
-        t0 = time.time()
-        result = agent.handle.run_sync(input, usage_limits=UsageLimits(request_limit=spec.loop.max_turns))
-        total_duration_ms = int((time.time() - t0) * 1000)
 
         trajectory = Trajectory(
             harness_name=spec.metadata.name,
@@ -82,6 +79,18 @@ class PydanticAIAdapter:
             adapter="pydantic_ai",
             input=input,
         )
+
+        t0 = time.time()
+        try:
+            result = agent.handle.run_sync(input, usage_limits=UsageLimits(request_limit=spec.loop.max_turns))
+        except UsageLimitExceeded:
+            # Pydantic AI raises rather than returning a partial result when the
+            # request cap is hit; there's no run() hook to intervene mid-loop the
+            # way the raw-API adapter's hand-rolled loop can, so no per-turn
+            # steps survive to attach here — see the module docstring.
+            trajectory.stopped_reason = "max_turns"
+            return trajectory
+        total_duration_ms = int((time.time() - t0) * 1000)
 
         messages = result.all_messages()
         for i, message in enumerate(messages):
