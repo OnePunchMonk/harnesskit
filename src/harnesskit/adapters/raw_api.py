@@ -34,6 +34,7 @@ class RawAPIAdapter:
             tool_sources={"custom"},
             hook_points=set(),
             memory_backends={"in_memory", "none"},
+            runtime="raw_api",
         )
 
     def build(self, spec: HarnessSpec) -> RunnableAgent:

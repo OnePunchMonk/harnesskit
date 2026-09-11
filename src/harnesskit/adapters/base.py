@@ -8,7 +8,8 @@ framework territory (design doc §13).
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
+from enum import Enum
 from typing import Any, Protocol
 
 from harnesskit.format.spec import HarnessSpec
@@ -21,6 +22,24 @@ class AdapterCapabilities:
     tool_sources: set[str]
     hook_points: set[str]
     memory_backends: set[str]
+    runtime: str = "unknown"
+
+
+class SupportStatus(str, Enum):
+    supported = "supported"
+    unsupported = "unsupported"
+
+
+@dataclass(frozen=True)
+class SupportFinding:
+    field: str
+    requested: str
+    status: SupportStatus
+    reason: str
+    runtime: str
+
+    def to_dict(self) -> dict[str, str]:
+        return asdict(self)
 
 
 @dataclass
@@ -43,24 +62,49 @@ class HarnessAdapter(Protocol):
         ...
 
 
-def check_support(spec: HarnessSpec, adapter: HarnessAdapter) -> list[str]:
-    """Returns human-readable warnings for spec features the adapter can't express."""
+def inspect_support(spec: HarnessSpec, adapter: HarnessAdapter) -> list[SupportFinding]:
+    """Return adapter-specific findings without initializing a provider or tool."""
     caps = adapter.supports()
-    warnings = []
+    findings = []
+
+    def add(field: str, requested: str, supported: bool, reason: str) -> None:
+        findings.append(
+            SupportFinding(
+                field=field,
+                requested=requested,
+                status=SupportStatus.supported if supported else SupportStatus.unsupported,
+                reason=reason,
+                runtime=caps.runtime,
+            )
+        )
+
     if spec.loop.type.value not in caps.loop_strategies:
-        warnings.append(
-            f"loop.type='{spec.loop.type.value}' is not supported by this adapter "
-            f"(supports: {', '.join(sorted(caps.loop_strategies))})"
+        add(
+            "loop.type",
+            spec.loop.type.value,
+            False,
+            f"supports: {', '.join(sorted(caps.loop_strategies))}",
         )
     for tool in spec.tools:
         if tool.source.value not in caps.tool_sources:
-            warnings.append(f"tool '{tool.name}' has source='{tool.source.value}', unsupported by this adapter")
+            add(f"tools.{tool.name}.source", tool.source.value, False, "tool source is not implemented")
     if spec.memory.session not in caps.memory_backends:
-        warnings.append(
-            f"memory.session='{spec.memory.session}' is not supported by this adapter "
-            f"(supports: {', '.join(sorted(caps.memory_backends))})"
+        add(
+            "memory.session",
+            spec.memory.session,
+            False,
+            f"supports: {', '.join(sorted(caps.memory_backends))}",
         )
     for hook in spec.hooks:
         if hook.point.value not in caps.hook_points:
-            warnings.append(f"hook at point='{hook.point.value}' is not supported by this adapter (ignored at runtime)")
-    return warnings
+            add(f"hooks.{hook.point.value}", hook.point.value, False, "hook is ignored at runtime")
+    return findings
+
+
+def check_support(spec: HarnessSpec, adapter: HarnessAdapter) -> list[str]:
+    """Return compatible human-readable warnings for unsupported findings."""
+    return [
+        f"{finding.field}='{finding.requested}' is unsupported by {finding.runtime}: {finding.reason}"
+        for finding in inspect_support(spec, adapter)
+        if finding.status is SupportStatus.unsupported
+    ]

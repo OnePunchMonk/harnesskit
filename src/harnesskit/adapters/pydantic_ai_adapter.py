@@ -37,6 +37,7 @@ class PydanticAIAdapter:
             tool_sources={"custom"},
             hook_points=set(),
             memory_backends={"none", "in_memory"},
+            runtime="pydantic_ai",
         )
 
     def build(self, spec: HarnessSpec) -> RunnableAgent:

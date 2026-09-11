@@ -20,8 +20,10 @@ format (M1), parser + linter (M2), trace collector + eval engine (M3), two
 adapters — raw-API and Pydantic AI v2 (M4), the NL-spec scaffolder (M5), and
 CLI polish — watch mode, `.harn` export/import (M6). Eval comparisons are
 case-paired and reject mismatched suites, so baselines cannot silently compare
-different benchmarks. The base suite runs offline; provider-adapter build
-checks run only with their optional extras.
+different benchmarks. Adapters report typed capability findings, and `--strict`
+on `run`/`eval` rejects unsupported declared behavior before any provider
+client or tool callback is initialized. The base suite runs offline;
+provider-adapter build checks run only with their optional extras.
 
 ## Try it
 
@@ -33,6 +35,7 @@ pip install -e ".[dev]"
 pytest -q
 harness lint examples/react-web-researcher
 harness inspect examples/react-web-researcher
+harness inspect examples/react-web-researcher --adapter raw_api --json
 
 # Optional provider adapters. Install only the adapter you intend to run.
 pip install -e ".[anthropic]"   # add [pydantic-ai] for that adapter
@@ -56,6 +59,10 @@ The base test suite skips optional-adapter build tests when their SDK is not
 installed. CI runs those tests separately with the relevant extras, so a base
 installation never needs provider packages, credentials, network access, or
 model downloads.
+
+`harness run` and `harness eval` warn about unsupported adapter features by
+default for compatibility. Add `--strict` to reject them before an adapter,
+provider client, or tool callback is initialized.
 
 ## Layout
 
