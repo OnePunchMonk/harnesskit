@@ -146,9 +146,34 @@ src/harnesskit/
   linter/     static analysis rules (infinite loops, missing termination, ...)
   trace/      trajectory capture, cost estimation, run + baseline storage
   eval/       scorers, run/replay/compare/regression-gate, MockAdapter for tests
-  adapters/   translates HarnessSpec -> a runnable agent: raw_api, pydantic_ai
+  adapters/   translates HarnessSpec -> a runnable agent: raw_api, pydantic_ai, callback
   scaffold/   NL spec -> ScaffoldPlan -> generated harness + self-validation
   packaging/  .harn bundle export/import with checksums, secrets excluded
   cli/        `harness` command, wires everything together
 examples/react-web-researcher/   a working example harness.yaml
+examples/local_qa_recipe/        the local debugging walkthrough below
 ```
+
+## Bring your own agent, and the local debugging walkthrough
+
+`harnesskit.adapters.callback_adapter.CallbackAdapter` wraps an existing,
+already-working agent — anything with a plain `(question) -> answer`
+entrypoint — without rewriting its internal loop. It only *observes* that
+agent's final output and wall-clock duration; it cannot enforce the wrapped
+agent's own timeouts or spend limits, and `CallbackAdapter.feature_status()`
+labels each capability explicitly as `controlled`, `observed`, or
+`unavailable` rather than implying parity with a fully harnesskit-run
+adapter (see `harnesskit.adapters.base.FeatureStatus`).
+
+`examples/local_qa_recipe/` puts this to work end-to-end: a naive
+keyword-lookup QA agent over a tiny fixture text corpus, deliberately
+non-financial and generic (not a specialized research task). Run
+`python examples/local_qa_recipe/run_recipe.py` (or read
+`examples/local_qa_recipe/README.md`) for the ~15-minute walkthrough: run
+the offline recipe, inspect an intentionally-failed case, promote it to a
+reviewed regression baseline, change the scorer and replay (same
+trajectories, different score, no new agent calls), attempt to change the
+agent and get an explicit "this requires a fresh run" error instead of a
+silently-reused old score, then compare two fresh runs and export/re-import
+the winner as a `.harn` bundle. `tests/test_local_qa_recipe.py` asserts each
+step's artifact/signal.

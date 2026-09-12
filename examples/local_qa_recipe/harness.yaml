@@ -1,0 +1,52 @@
+schema_version: 1
+metadata:
+  name: local-qa-recipe
+  version: 0.1.0
+  author: pythonslacks
+  description: >
+    Local text lookup/extraction/QA over a tiny fixture corpus, run through a
+    plain callback-based agent (no framework, no provider API) via
+    harnesskit's CallbackAdapter. Deliberately non-financial and generic —
+    demonstrates the P1 debugging workflow (issue #9), not a specialized
+    research task.
+
+model:
+  provider: none
+  model_id: "external:callback"
+  temperature: 0.0
+
+loop:
+  type: custom
+  max_turns: 1
+
+tools: []
+
+memory:
+  session: none
+
+termination:
+  - type: max_turns
+    value: 1
+
+eval:
+  cases:
+    - id: eiffel_location
+      input: "Where is the Eiffel Tower located?"
+      expected_output_contains: ["Paris"]
+      scoring_mode: exact_match
+    - id: everest_height
+      input: "What is the tallest mountain on Earth?"
+      expected_output_contains: ["Everest"]
+      scoring_mode: exact_match
+    - id: great_wall_length
+      input: "How long is the Great Wall of China?"
+      expected_output_contains: ["13,000"]
+      scoring_mode: exact_match
+    - id: nepal_capital
+      input: "What is the capital of Nepal?"
+      expected_output_contains: ["Kathmandu"]
+      scoring_mode: exact_match
+
+scaffold:
+  system_prompt: system_prompt.md
+  system_prompt_is_file: true

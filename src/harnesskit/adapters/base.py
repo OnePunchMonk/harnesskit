@@ -30,6 +30,24 @@ class SupportStatus(str, Enum):
     unsupported = "unsupported"
 
 
+class FeatureStatus(str, Enum):
+    """Finer-grained than `SupportStatus`: whether a feature is actually
+    enforced by harnesskit's own execution (`controlled`), merely visible in
+    the trace without harnesskit being able to enforce it (`observed`), or
+    not present at all for this adapter (`unavailable`).
+
+    Introduced for adapters that wrap externally-run agents (e.g.
+    `CallbackAdapter`): such an adapter can *observe* wall-clock duration and
+    a returned output, but cannot *control* the wrapped agent's internal
+    timeouts or spend limits — those are `unavailable` through this path,
+    never silently reported as if harnesskit enforces them.
+    """
+
+    controlled = "controlled"
+    observed = "observed"
+    unavailable = "unavailable"
+
+
 @dataclass(frozen=True)
 class SupportFinding:
     field: str
