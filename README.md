@@ -102,6 +102,41 @@ propagates a raising tool callback as an exception instead of an error
 result the model can see — both show up as an honest ❌/⚠️ in
 `harness conformance` rather than a silently-passing declaration.
 
+## Evidence integrity and the public API
+
+The things a comparison depends on being trustworthy are enforced, not just
+documented:
+
+- **Run storage** uses collision-resistant run ids (timestamp + random
+  suffix) and atomic (write-temp-then-rename) writes, so two runs started in
+  the same millisecond never overwrite each other and a crash mid-write
+  never corrupts a stored run.
+- **Named baselines** can't be silently replaced: `save_baseline(...)`
+  raises `FileExistsError` unless called with `overwrite=True` (or `harness
+  eval --save-baseline NAME --overwrite-baseline` on the CLI). Old
+  (pre-schema_version) baseline and run files still load; a baseline saved by
+  a newer, incompatible harnesskit raises a specific `IncompatibleArtifactError`
+  instead of an opaque crash.
+- **Cost accounting** distinguishes observed, estimated, known-zero, and
+  unavailable cost (`CostStatus`) — an unknown-model call is reported as
+  unavailable, never as `$0`, and `SuiteResult.avg_cost_usd` excludes
+  unavailable cases rather than averaging them in as zero
+  (`unavailable_cost_case_ids` surfaces which cases those were).
+- **Errored/unscored cases stay in the denominator**: `run_suite` catches a
+  failing case and keeps it in `SuiteResult.results` with `status=errored`
+  instead of dropping it, so `pass_rate` reflects every attempted case.
+- **Bundle import** validates the archive's exact member set against its
+  checksum manifest (no unlisted extra file, no missing entry, no
+  duplicates), rejects unsafe paths (`../`, absolute) and symlinks, and
+  checks the bundle format version — all before extracting a single file.
+  Checksums prove a file matches the manifest, not that the manifest's
+  publisher is trustworthy.
+
+A small, deliberate public API re-exports these pieces (and load/replay/
+compare) for direct `import harnesskit` use — see the module docstring in
+`src/harnesskit/__init__.py` for the full list. Everything else in
+`harnesskit.*` remains CLI-only/internal and may change without notice.
+
 ## Layout
 
 ```

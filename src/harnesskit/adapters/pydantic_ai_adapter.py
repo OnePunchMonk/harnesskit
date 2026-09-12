@@ -27,7 +27,7 @@ import time
 from harnesskit.adapters._tool_loading import load_tool_callback
 from harnesskit.adapters.base import AdapterCapabilities, RunnableAgent
 from harnesskit.format.spec import HarnessSpec
-from harnesskit.trace.schema import Step, StepType, Trajectory, estimate_cost_usd
+from harnesskit.trace.schema import CostStatus, Step, StepType, Trajectory, estimate_cost_usd
 
 
 class PydanticAIAdapter:
@@ -96,9 +96,13 @@ class PydanticAIAdapter:
         for i, message in enumerate(messages):
             if message.kind == "response":
                 usage = message.usage
-                cost = getattr(usage, "cost", None) or estimate_cost_usd(
-                    spec.model.model_id, usage.input_tokens, usage.output_tokens
-                )
+                observed_cost = getattr(usage, "cost", None)
+                if observed_cost is not None:
+                    cost, cost_status = float(observed_cost), CostStatus.observed
+                else:
+                    cost, cost_status = estimate_cost_usd(
+                        spec.model.model_id, usage.input_tokens, usage.output_tokens
+                    )
                 text = "\n".join(p.content for p in message.parts if p.part_kind == "text")
                 trajectory.steps.append(
                     Step(
@@ -106,7 +110,8 @@ class PydanticAIAdapter:
                         output=text,
                         tokens_in=usage.input_tokens,
                         tokens_out=usage.output_tokens,
-                        cost_usd=float(cost),
+                        cost_usd=cost,
+                        cost_status=cost_status,
                         duration_ms=total_duration_ms // max(1, len([m for m in messages if m.kind == "response"])),
                     )
                 )

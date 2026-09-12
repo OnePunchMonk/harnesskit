@@ -92,7 +92,9 @@ class RawAPIAdapter:
                 # some SDK versions have dropped `temperature` from create() entirely
                 response = client.messages.create(**create_kwargs)
             duration_ms = int((time.time() - t0) * 1000)
-            cost = estimate_cost_usd(spec.model.model_id, response.usage.input_tokens, response.usage.output_tokens)
+            cost, cost_status = estimate_cost_usd(
+                spec.model.model_id, response.usage.input_tokens, response.usage.output_tokens
+            )
 
             text_blocks = [b.text for b in response.content if b.type == "text"]
             last_text_blocks = text_blocks
@@ -106,6 +108,7 @@ class RawAPIAdapter:
                     tokens_in=response.usage.input_tokens,
                     tokens_out=response.usage.output_tokens,
                     cost_usd=cost,
+                    cost_status=cost_status,
                     duration_ms=duration_ms,
                 )
             )

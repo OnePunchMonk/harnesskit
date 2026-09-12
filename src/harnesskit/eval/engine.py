@@ -7,6 +7,7 @@ from __future__ import annotations
 import random
 import statistics
 from dataclasses import dataclass, field
+from enum import Enum
 
 from harnesskit.adapters.base import HarnessAdapter
 from harnesskit.eval.scorers import Score, score_trajectory, validate_scoring_mode
@@ -14,15 +15,28 @@ from harnesskit.format.spec import EvalCase, HarnessSpec
 from harnesskit.trace.schema import Trajectory
 
 
+class CaseStatus(str, Enum):
+    """Explicit case outcome, kept in `SuiteResult.results` regardless of
+    value so a missing/errored/cancelled/unscored case is never filtered out
+    before a success-rate or coverage ratio is computed."""
+
+    ok = "ok"
+    errored = "errored"
+    cancelled = "cancelled"
+    unscored = "unscored"
+
+
 @dataclass
 class CaseResult:
     case: EvalCase
-    trajectory: Trajectory
+    trajectory: Trajectory | None
     scores: list[Score]
+    status: CaseStatus = CaseStatus.ok
+    error: str | None = None
 
     @property
     def passed(self) -> bool:
-        return bool(self.scores) and all(s.passed for s in self.scores)
+        return self.status == CaseStatus.ok and bool(self.scores) and all(s.passed for s in self.scores)
 
     @property
     def is_scored(self) -> bool:
@@ -41,25 +55,54 @@ class SuiteResult:
 
     @property
     def pass_rate(self) -> float:
+        """Denominator is every attempted case, including errored/cancelled/
+        unscored ones (they simply count as not-passed) — never just the
+        subset that happened to score cleanly."""
         return sum(1 for r in self.results if r.passed) / len(self.results) if self.results else 0.0
 
     @property
-    def avg_turns(self) -> float:
-        return statistics.mean(r.trajectory.turns for r in self.results) if self.results else 0.0
+    def errored_case_ids(self) -> list[str]:
+        return [r.case.id for r in self.results if r.status == CaseStatus.errored]
 
     @property
-    def avg_cost_usd(self) -> float:
-        return statistics.mean(r.trajectory.total_cost_usd for r in self.results) if self.results else 0.0
+    def unscored_case_ids(self) -> list[str]:
+        return [r.case.id for r in self.results if r.status == CaseStatus.unscored]
+
+    @property
+    def avg_turns(self) -> float:
+        turns = [r.trajectory.turns for r in self.results if r.trajectory is not None]
+        return statistics.mean(turns) if turns else 0.0
+
+    @property
+    def unavailable_cost_case_ids(self) -> list[str]:
+        """Cases whose trajectory contains at least one step with an
+        unavailable (unknown) cost. `avg_cost_usd` excludes these rather than
+        silently averaging their missing cost in as $0 — check this list to
+        know when the average is incomplete."""
+        return [r.case.id for r in self.results if r.trajectory is not None and r.trajectory.has_unavailable_cost]
+
+    @property
+    def avg_cost_usd(self) -> float | None:
+        known = [
+            r.trajectory.total_cost_usd
+            for r in self.results
+            if r.trajectory is not None and not r.trajectory.has_unavailable_cost
+        ]
+        return statistics.mean(known) if known else None
 
     @property
     def total_duplicate_tool_calls(self) -> int:
-        return sum(r.trajectory.duplicate_tool_calls for r in self.results)
+        return sum(r.trajectory.duplicate_tool_calls for r in self.results if r.trajectory is not None)
 
 
 def run_case(spec: HarnessSpec, case: EvalCase, adapter: HarnessAdapter, agent) -> CaseResult:
-    trajectory = adapter.run(agent, case.input)
+    try:
+        trajectory = adapter.run(agent, case.input)
+    except Exception as e:  # noqa: BLE001 — a failing case must stay visible, not crash the whole suite
+        return CaseResult(case=case, trajectory=None, scores=[], status=CaseStatus.errored, error=str(e))
     scores = score_trajectory(trajectory, case)
-    return CaseResult(case=case, trajectory=trajectory, scores=scores)
+    status = CaseStatus.ok if scores else CaseStatus.unscored
+    return CaseResult(case=case, trajectory=trajectory, scores=scores, status=status)
 
 
 def run_suite(spec: HarnessSpec, adapter: HarnessAdapter, sample: int | None = None) -> SuiteResult:
@@ -96,11 +139,15 @@ def replay_suite(spec: HarnessSpec, trajectories: dict[str, Trajectory]) -> Suit
 @dataclass
 class MetricDelta:
     metric: str
-    a: float
-    b: float
+    a: float | None
+    b: float | None
 
     @property
-    def delta(self) -> float:
+    def delta(self) -> float | None:
+        """None when either side's value is unavailable (e.g. avg_cost_usd
+        with no cases of known cost) — never silently treated as 0."""
+        if self.a is None or self.b is None:
+            return None
         return self.b - self.a
 
 
@@ -193,7 +240,7 @@ def check_regression(baseline: SuiteResult, current: SuiteResult, tolerances: di
     worse_when_lower = {"pass_rate"}
     for d in ab.deltas:
         tol = tolerances.get(d.metric)
-        if tol is None:
+        if tol is None or d.delta is None:
             continue
         if d.metric in worse_when_lower and d.delta < -tol:
             regressions.append(d)

@@ -1,6 +1,7 @@
 from harnesskit.eval.engine import (
     ABResult,
     CaseResult,
+    CaseStatus,
     MetricDelta,
     RegressionResult,
     SuiteComparisonError,
@@ -19,6 +20,7 @@ __all__ = [
     "check_regression",
     "SuiteResult",
     "CaseResult",
+    "CaseStatus",
     "ABResult",
     "MetricDelta",
     "RegressionResult",

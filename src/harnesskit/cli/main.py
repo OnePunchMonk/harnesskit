@@ -264,19 +264,30 @@ def _render_suite_table(suite: SuiteResult) -> Table:
     table.add_column("scores")
     for r in suite.results:
         mark = "[green]✓[/green]" if r.passed else "[red]✗[/red]"
+        if r.trajectory is None:
+            score_str = f"{r.status.value}: {r.error or 'no trajectory'}"
+            table.add_row(r.case.id, mark, "-", "-", score_str)
+            continue
         if not r.is_scored:
             score_str = "unscored: add an outcome, trajectory, or budget assertion"
         else:
             score_str = ", ".join(f"{s.name}={s.value:.2f}" for s in r.scores if not s.passed) or "all pass"
-        table.add_row(r.case.id, mark, str(r.trajectory.turns), f"${r.trajectory.total_cost_usd:.4f}", score_str)
+        cost_str = "unavailable" if r.trajectory.has_unavailable_cost else f"${r.trajectory.total_cost_usd:.4f}"
+        table.add_row(r.case.id, mark, str(r.trajectory.turns), cost_str, score_str)
     return table
 
 
 def _suite_summary_line(suite: SuiteResult) -> str:
-    return (
+    avg_cost = "unavailable" if suite.avg_cost_usd is None else f"${suite.avg_cost_usd:.4f}"
+    line = (
         f"\npass_rate={suite.pass_rate:.2f}  avg_turns={suite.avg_turns:.1f}  "
-        f"avg_cost=${suite.avg_cost_usd:.4f}  dup_tool_calls={suite.total_duplicate_tool_calls}"
+        f"avg_cost={avg_cost}  dup_tool_calls={suite.total_duplicate_tool_calls}"
     )
+    if suite.errored_case_ids:
+        line += f"\n[red]errored:[/red] {', '.join(suite.errored_case_ids)}"
+    if suite.unavailable_cost_case_ids:
+        line += f"\n[yellow]unavailable cost for:[/yellow] {', '.join(suite.unavailable_cost_case_ids)}"
+    return line
 
 
 @app.command()
@@ -304,9 +315,10 @@ def run(
         _fail(f"Adapter run failed: {e}", verbose, e)
     path = save_trajectory(directory, trajectory)
 
+    cost_str = "unavailable" if trajectory.has_unavailable_cost else f"${trajectory.total_cost_usd:.4f}"
     console.print(f"[bold]stopped:[/bold] {trajectory.stopped_reason}  "
                   f"[bold]turns:[/bold] {trajectory.turns}  "
-                  f"[bold]cost:[/bold] ${trajectory.total_cost_usd:.4f}")
+                  f"[bold]cost:[/bold] {cost_str}")
     console.print(f"\n{trajectory.final_output or '(no final output)'}")
     console.print(f"\n[dim]trace saved to {path}[/dim]")
 
@@ -318,6 +330,9 @@ def eval_cmd(
     adapter_name: str = typer.Option("raw_api", "--adapter", help=f"One of: {', '.join(ADAPTERS)}"),
     strict: bool = typer.Option(False, "--strict", help="Reject unsupported declared behavior before adapter setup"),
     save_baseline: str = typer.Option(None, "--save-baseline", help="Snapshot this run under a name for future --compare"),
+    overwrite_baseline: bool = typer.Option(
+        False, "--overwrite-baseline", help="Allow --save-baseline to replace an existing baseline of the same name"
+    ),
     compare_baseline: str = typer.Option(None, "--compare", help="Diff this run against a saved baseline; fail on regression"),
     verbose: bool = typer.Option(False, "--verbose"),
 ) -> None:
@@ -339,13 +354,19 @@ def eval_cmd(
     except Exception as e:  # noqa: BLE001 — provider/auth errors surfaced concisely by default
         _fail(f"Adapter run failed: {e}", verbose, e)
     for r in suite.results:
-        save_trajectory(directory, r.trajectory, run_id=r.case.id)
+        if r.trajectory is not None:
+            save_trajectory(directory, r.trajectory, run_id=r.case.id)
 
     console.print(_render_suite_table(suite))
     console.print(_suite_summary_line(suite))
 
     if save_baseline:
-        path = save_baseline_fn(directory, save_baseline, {r.case.id: r.trajectory for r in suite.results})
+        scored_trajectories = {r.case.id: r.trajectory for r in suite.results if r.trajectory is not None}
+        try:
+            path = save_baseline_fn(directory, save_baseline, scored_trajectories, overwrite=overwrite_baseline)
+        except FileExistsError as e:
+            console.print(f"[red]✗[/red] {e}")
+            raise typer.Exit(1)
         console.print(f"[dim]baseline '{save_baseline}' saved to {path}[/dim]")
 
     if compare_baseline:
@@ -533,7 +554,8 @@ def watch(
             try:
                 adapter = ADAPTERS[adapter_name]()
                 suite = run_suite(result.spec, adapter, sample=sample)
-                console.print(f"  eval (sample={sample}): pass_rate={suite.pass_rate:.2f} avg_cost=${suite.avg_cost_usd:.4f}")
+                avg_cost = "unavailable" if suite.avg_cost_usd is None else f"${suite.avg_cost_usd:.4f}"
+                console.print(f"  eval (sample={sample}): pass_rate={suite.pass_rate:.2f} avg_cost={avg_cost}")
             except Exception as e:  # noqa: BLE001 — keep the watch loop alive on a bad run
                 console.print(f"  [red]eval failed:[/red] {e}")
 
@@ -576,9 +598,10 @@ def export_cmd(
         console.print(f"  requires MCP servers: {', '.join(bundle.required_mcp_servers)}")
     if bundle.eval_summary:
         s = bundle.eval_summary
+        avg_cost = "unavailable" if s["avg_cost_usd"] is None else f"${s['avg_cost_usd']:.4f}"
         console.print(
             f"  [dim]eval_summary (self-reported, unverified):[/dim] pass_rate={s['pass_rate']:.2f} "
-            f"avg_cost=${s['avg_cost_usd']:.4f} over {s['case_count']} case(s) from baseline '{s['baseline_name']}'"
+            f"avg_cost={avg_cost} over {s['case_count']} case(s) from baseline '{s['baseline_name']}'"
         )
 
 
