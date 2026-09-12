@@ -18,6 +18,7 @@ from pathlib import Path
 from harnesskit.adapters._tool_loading import load_tool_callback
 from harnesskit.adapters.base import AdapterCapabilities, RunnableAgent
 from harnesskit.format.spec import HarnessSpec, TerminationCondition
+from harnesskit.trace.cache import cache_key, load_cached_response, save_cached_response
 from harnesskit.trace.schema import Step, StepType, Trajectory, estimate_cost_usd
 
 
@@ -25,8 +26,57 @@ class MissingAPIKeyError(Exception):
     pass
 
 
+class _CachedBlock:
+    def __init__(self, data: dict):
+        self.type = data["type"]
+        self.text = data.get("text")
+        self.name = data.get("name")
+        self.input = data.get("input")
+        self.id = data.get("id")
+
+
+class _CachedUsage:
+    def __init__(self, data: dict):
+        self.input_tokens = data["input_tokens"]
+        self.output_tokens = data["output_tokens"]
+
+
+class _CachedResponse:
+    """Reconstructs just the subset of an Anthropic Message response this
+    adapter reads (`.content` blocks, `.usage`), from a cached JSON payload —
+    so a cache hit doesn't require the `anthropic` package to deserialize."""
+
+    def __init__(self, data: dict):
+        self.content = [_CachedBlock(b) for b in data["content"]]
+        self.usage = _CachedUsage(data["usage"])
+
+
+def _serialize_response(response) -> dict:
+    content = []
+    for b in response.content:
+        entry = {"type": b.type}
+        if b.type == "text":
+            entry["text"] = b.text
+        elif b.type == "tool_use":
+            entry["name"] = b.name
+            entry["input"] = b.input
+            entry["id"] = b.id
+        content.append(entry)
+    return {
+        "content": content,
+        "usage": {"input_tokens": response.usage.input_tokens, "output_tokens": response.usage.output_tokens},
+    }
+
+
 class RawAPIAdapter:
     """Implements HarnessAdapter for loop.type == 'react' against Anthropic's API."""
+
+    def __init__(self, cache: bool = False):
+        # Opt-in response cache (issue #4 item 9): keyed on
+        # (model, system, messages, tools), stored under
+        # <harness_dir>/.harness/cache/. Off by default so behavior doesn't
+        # silently change for callers who want a fresh call every time.
+        self.cache = cache
 
     def supports(self) -> AdapterCapabilities:
         return AdapterCapabilities(
@@ -86,11 +136,23 @@ class RawAPIAdapter:
                 messages=messages,
                 tools=tool_schemas or None,
             )
-            try:
-                response = client.messages.create(temperature=spec.model.temperature, **create_kwargs)
-            except TypeError:
-                # some SDK versions have dropped `temperature` from create() entirely
-                response = client.messages.create(**create_kwargs)
+            key = None
+            if self.cache:
+                assert spec.source_dir is not None
+                key = cache_key(spec.model.model_id, system_prompt, messages, tool_schemas)
+                cached = load_cached_response(spec.source_dir, key)
+                response = _CachedResponse(cached) if cached is not None else None
+            else:
+                response = None
+
+            if response is None:
+                try:
+                    response = client.messages.create(temperature=spec.model.temperature, **create_kwargs)
+                except TypeError:
+                    # some SDK versions have dropped `temperature` from create() entirely
+                    response = client.messages.create(**create_kwargs)
+                if self.cache:
+                    save_cached_response(spec.source_dir, key, _serialize_response(response))
             duration_ms = int((time.time() - t0) * 1000)
             cost, cost_status = estimate_cost_usd(
                 spec.model.model_id, response.usage.input_tokens, response.usage.output_tokens

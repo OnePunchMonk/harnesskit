@@ -1,9 +1,12 @@
 from harnesskit.trace.schema import AttemptStatus, CostStatus, Step, StepType, Trajectory, estimate_cost_usd
 from harnesskit.trace.store import (
+    BaselineProvenance,
     IncompatibleArtifactError,
+    current_provenance,
     list_baselines,
     list_trajectories,
     load_baseline,
+    load_baseline_provenance,
     load_trajectory,
     save_baseline,
     save_trajectory,
@@ -23,4 +26,7 @@ __all__ = [
     "load_baseline",
     "list_baselines",
     "IncompatibleArtifactError",
+    "BaselineProvenance",
+    "current_provenance",
+    "load_baseline_provenance",
 ]

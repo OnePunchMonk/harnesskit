@@ -20,7 +20,9 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
 from time import time
 
@@ -112,11 +114,72 @@ def baselines_dir(harness_dir: Path) -> Path:
     return d
 
 
+@dataclass
+class BaselineProvenance:
+    """What the baseline was captured with — compared against the current
+    run's own values so a regression gate can't mistake environment drift
+    (a different model, adapter, harness version, or git sha) for a real
+    harness regression (issue #4 item 15)."""
+
+    model_id: str | None
+    adapter: str | None
+    harness_name: str | None
+    harness_version: str | None
+    git_sha: str | None
+    saved_at: float | None
+
+    @property
+    def is_legacy(self) -> bool:
+        """True for a pre-provenance baseline: nothing was recorded, so a
+        mismatch check must not silently claim a match."""
+        return (
+            self.model_id is None
+            and self.adapter is None
+            and self.harness_name is None
+            and self.harness_version is None
+            and self.git_sha is None
+            and self.saved_at is None
+        )
+
+
+def _git_sha(harness_dir: Path) -> str | None:
+    """Best-effort `git rev-parse HEAD` in the harness's directory. Returns
+    None (never raises) when the directory isn't inside a git repo, or git
+    isn't available at all."""
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=str(harness_dir),
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode == 0:
+            return result.stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return None
+
+
+def current_provenance(harness_dir: Path, model_id: str, adapter: str, harness_name: str, harness_version: str) -> BaselineProvenance:
+    """Build the provenance record for a run about to be saved as a baseline
+    (or compared against one)."""
+    return BaselineProvenance(
+        model_id=model_id,
+        adapter=adapter,
+        harness_name=harness_name,
+        harness_version=harness_version,
+        git_sha=_git_sha(harness_dir),
+        saved_at=time(),
+    )
+
+
 def save_baseline(
     harness_dir: Path,
     name: str,
     trajectories_by_case_id: dict[str, Trajectory],
     overwrite: bool = False,
+    provenance: BaselineProvenance | None = None,
 ) -> Path:
     """Snapshot a completed eval run as a named baseline: {case_id: trajectory}.
 
@@ -127,6 +190,11 @@ def save_baseline(
     A named baseline is evidence other comparisons depend on, so writing to
     an existing name without `overwrite=True` raises `FileExistsError`
     rather than silently replacing it.
+
+    `provenance` (model id, adapter, harness name+version, git sha, timestamp)
+    is persisted alongside the trajectories so a future `--compare` can warn
+    loudly when the environment that captured the baseline doesn't match the
+    current run's.
     """
     path = baselines_dir(harness_dir) / f"{name}.json"
     if path.exists() and not overwrite:
@@ -137,6 +205,18 @@ def save_baseline(
     payload = {
         "schema_version": CURRENT_SCHEMA_VERSION,
         "baselines": {case_id: json.loads(t.model_dump_json()) for case_id, t in trajectories_by_case_id.items()},
+        "provenance": (
+            {
+                "model_id": provenance.model_id,
+                "adapter": provenance.adapter,
+                "harness_name": provenance.harness_name,
+                "harness_version": provenance.harness_version,
+                "git_sha": provenance.git_sha,
+                "saved_at": provenance.saved_at,
+            }
+            if provenance is not None
+            else None
+        ),
     }
     _atomic_write_text(path, json.dumps(payload, indent=2))
     return path
@@ -154,6 +234,28 @@ def load_baseline(harness_dir: Path, name: str) -> dict[str, Trajectory]:
         # Legacy format: {case_id: trajectory} directly, no wrapper.
         data = raw
     return {case_id: Trajectory.model_validate(t) for case_id, t in data.items()}
+
+
+def load_baseline_provenance(harness_dir: Path, name: str) -> BaselineProvenance:
+    """Load just the provenance record for a baseline. A legacy baseline (no
+    schema_version wrapper, or a wrapper with no "provenance" key) reports an
+    all-None `BaselineProvenance` (`.is_legacy` is True) rather than raising
+    or silently pretending to match the current run."""
+    path = baselines_dir(harness_dir) / f"{name}.json"
+    if not path.exists():
+        raise FileNotFoundError(f"No baseline named '{name}' at {path}")
+    raw = json.loads(path.read_text())
+    prov = raw.get("provenance") if isinstance(raw, dict) else None
+    if not prov:
+        return BaselineProvenance(model_id=None, adapter=None, harness_name=None, harness_version=None, git_sha=None, saved_at=None)
+    return BaselineProvenance(
+        model_id=prov.get("model_id"),
+        adapter=prov.get("adapter"),
+        harness_name=prov.get("harness_name"),
+        harness_version=prov.get("harness_version"),
+        git_sha=prov.get("git_sha"),
+        saved_at=prov.get("saved_at"),
+    )
 
 
 def list_baselines(harness_dir: Path) -> list[str]:

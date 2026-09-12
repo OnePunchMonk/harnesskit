@@ -14,8 +14,9 @@ from harnesskit.eval.scorers import score_trajectory
 from harnesskit.linter import Severity, lint
 from harnesskit.packaging import export_bundle, import_bundle, preview_bundle
 from harnesskit.parser import HarnessLoadError, load_harness
-from harnesskit.trace import Trajectory, list_baselines, load_baseline, save_trajectory
+from harnesskit.trace import Trajectory, current_provenance, list_baselines, load_baseline, load_baseline_provenance, save_trajectory
 from harnesskit.trace import save_baseline as save_baseline_fn
+from harnesskit.trace.store import _git_sha as _git_sha_for_warning
 
 app = typer.Typer(no_args_is_help=True, help="harnesskit: infrastructure for building agent harnesses")
 console = Console()
@@ -138,14 +139,67 @@ def conformance(
 
 
 @app.command()
+def templates() -> None:
+    """List the built-in scaffold templates usable with `harness init --template`."""
+    from harnesskit.scaffold.templates import TEMPLATES
+
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("template")
+    table.add_column("description")
+    for name, template in TEMPLATES.items():
+        table.add_row(name, template.description or "(no description)")
+    console.print(table)
+
+
+@app.command()
 def init(
     name: str = typer.Argument(None, help="Harness name (omit when using --spec; the plan names itself)"),
     spec: str = typer.Option(None, "--spec", help="Natural-language description — scaffolds via an LLM call + self-validation"),
+    template: str = typer.Option(
+        None, "--template", help="Generate directly from a named template — offline, deterministic, no LLM call. See `harness templates`."
+    ),
     directory: Path = typer.Option(None, help="Where to create it (default: ./<name>)"),
     verbose: bool = typer.Option(False, "--verbose"),
 ) -> None:
-    """Scaffold a harness directory: a minimal skeleton by default, or a
-    filled-in one from a natural-language description via --spec."""
+    """Scaffold a harness directory: a minimal skeleton by default, a
+    filled-in one from a natural-language description via --spec, or a
+    filled-in one from a named template via --template (offline, no LLM call)."""
+    if spec and template:
+        console.print("[red]✗[/red] Pass either --spec or --template, not both.")
+        raise typer.Exit(1)
+
+    if template:
+        from harnesskit.scaffold import generate_harness
+        from harnesskit.scaffold.plan import ScaffoldPlan
+        from harnesskit.scaffold.templates import TEMPLATES
+
+        if template not in TEMPLATES:
+            console.print(f"[red]✗[/red] Unknown template '{template}'. Valid choices: {', '.join(TEMPLATES)}")
+            raise typer.Exit(1)
+        if not name:
+            console.print("[red]✗[/red] Provide a harness name.")
+            raise typer.Exit(1)
+
+        t = TEMPLATES[template]
+        plan = ScaffoldPlan(
+            name=name,
+            description=t.description or f"A {template} harness.",
+            purpose=t.description or template,
+            domain=template,
+            guardrails_needed=list(t.guardrails),
+            max_turns=t.max_turns,
+            cost_ceiling_usd=t.cost_ceiling_usd,
+        )
+        target = directory or Path(name)
+        try:
+            generate_harness(plan, target)
+        except FileExistsError as e:
+            console.print(f"[red]✗[/red] {e}")
+            raise typer.Exit(1)
+        console.print(f"[green]✓[/green] Generated {template} harness at {target}/ (offline, no LLM call)")
+        console.print("  Wire up the tools/*.py stubs, add eval cases, then `harness eval .`")
+        return
+
     if spec:
         from harnesskit.scaffold import generate_harness, infer_plan, validate_and_fix
 
@@ -238,12 +292,17 @@ def _fail(message: str, verbose: bool, exc: Exception | None = None) -> None:
     raise typer.Exit(1)
 
 
-def _resolve_adapter(name: str, spec, *, strict: bool = False) -> object:
+def _resolve_adapter(name: str, spec, *, strict: bool = False, cache: bool = False) -> object:
     adapter_cls = ADAPTERS.get(name)
     if adapter_cls is None:
         console.print(f"[red]✗[/red] Unknown adapter '{name}'. Available: {', '.join(ADAPTERS)}")
         raise typer.Exit(1)
-    adapter = adapter_cls()
+    if cache and name == "raw_api":
+        adapter = adapter_cls(cache=True)
+    else:
+        if cache:
+            console.print(f"[yellow]warning[/yellow]: --cache is only supported by the raw_api adapter; ignored for '{name}'")
+        adapter = adapter_cls()
     warnings = check_support(spec, adapter)
     if strict and warnings:
         console.print("[red]✗[/red] Strict preflight rejected unsupported required behavior:")
@@ -277,6 +336,81 @@ def _render_suite_table(suite: SuiteResult) -> Table:
     return table
 
 
+def _truncate(text: str | None, limit: int = 400) -> str:
+    if not text:
+        return "(none)"
+    text = text.strip()
+    if len(text) <= limit:
+        return text
+    return text[:limit] + f"... [dim]({len(text) - limit} more chars)[/dim]"
+
+
+def render_trajectory(trajectory: Trajectory, console: Console, label: str | None = None) -> None:
+    """Pretty-print a single Trajectory step by step — shared by `harness
+    show` and `harness eval --failed-only` so a failing case is debuggable
+    inline without opening JSON."""
+    from harnesskit.trace.schema import StepType
+
+    if label:
+        console.print(f"\n[bold]== {label} ==[/bold]")
+    console.print(f"[dim]input:[/dim] {_truncate(trajectory.input, 200)}")
+    for i, step in enumerate(trajectory.steps, start=1):
+        if step.step_type == StepType.llm_call:
+            console.print(f"[bold cyan]{i}. llm_call[/bold cyan]  tokens_in={step.tokens_in} tokens_out={step.tokens_out}")
+            console.print(f"   [dim]input:[/dim]  {_truncate(step.input)}")
+            console.print(f"   [dim]output:[/dim] {_truncate(step.output)}")
+        elif step.step_type == StepType.tool_call:
+            console.print(f"[bold magenta]{i}. tool_call[/bold magenta]  tool={step.tool_name}")
+            console.print(f"   [dim]args:[/dim]   {step.tool_args}")
+            console.print(f"   [dim]result:[/dim] {_truncate(step.tool_result)}")
+        else:
+            console.print(f"[bold yellow]{i}. {step.step_type.value}[/bold yellow]  {step.note or ''}")
+    cost_str = "unavailable" if trajectory.has_unavailable_cost else f"${trajectory.total_cost_usd:.4f}"
+    console.print(
+        f"[bold]stopped_reason:[/bold] {trajectory.stopped_reason}  "
+        f"[bold]total_tokens:[/bold] {trajectory.total_tokens}  "
+        f"[bold]total_cost:[/bold] {cost_str}"
+    )
+    console.print(f"[bold]final_output:[/bold] {_truncate(trajectory.final_output)}")
+
+
+@app.command()
+def show(
+    path: Path = typer.Argument(..., help="A saved run JSON, or a baseline-style {case_id: trajectory} JSON"),
+    case: str = typer.Option(None, "--case", help="Case id to show, when `path` is a baseline-style file with multiple trajectories"),
+) -> None:
+    """Pretty-print a saved trajectory step by step: llm/tool calls, tokens,
+    costs, and where it stopped — the debugging view for a failing eval case."""
+    raw = json.loads(path.read_text())
+
+    def _as_trajectory(data: dict) -> Trajectory:
+        if isinstance(data, dict) and "schema_version" in data and "trajectory" in data:
+            return Trajectory.model_validate(data["trajectory"])
+        return Trajectory.model_validate(data)
+
+    # A single run artifact: {"schema_version":..., "trajectory": {...}} or a raw Trajectory dict.
+    if isinstance(raw, dict) and ("steps" in raw or "trajectory" in raw):
+        render_trajectory(_as_trajectory(raw), console)
+        return
+
+    # Baseline-style {case_id: trajectory}, optionally wrapped as {"baselines": {...}}.
+    cases = raw.get("baselines", raw) if isinstance(raw, dict) else raw
+    if case:
+        if case not in cases:
+            console.print(f"[red]✗[/red] No case '{case}' in {path}. Available: {', '.join(cases)}")
+            raise typer.Exit(1)
+        render_trajectory(Trajectory.model_validate(cases[case]), console, label=case)
+        return
+
+    if len(cases) == 1:
+        ((only_id, only_traj),) = cases.items()
+        render_trajectory(Trajectory.model_validate(only_traj), console, label=only_id)
+        return
+
+    console.print(f"Multiple cases in {path} — pass --case to pick one: {', '.join(cases)}")
+    raise typer.Exit(1)
+
+
 def _suite_summary_line(suite: SuiteResult) -> str:
     avg_cost = "unavailable" if suite.avg_cost_usd is None else f"${suite.avg_cost_usd:.4f}"
     line = (
@@ -296,6 +430,7 @@ def run(
     input: str = typer.Option(..., "--input", help="Task to run the harness on"),
     adapter_name: str = typer.Option("raw_api", "--adapter", help=f"One of: {', '.join(ADAPTERS)}"),
     strict: bool = typer.Option(False, "--strict", help="Reject unsupported declared behavior before adapter setup"),
+    cache: bool = typer.Option(False, "--cache", help="Cache model-call responses under .harness/cache/ (raw_api adapter only)"),
     verbose: bool = typer.Option(False, "--verbose"),
 ) -> None:
     """Execute the harness on a single input."""
@@ -305,7 +440,7 @@ def run(
         console.print(f"[red]✗[/red] {e}")
         raise typer.Exit(1)
 
-    adapter = _resolve_adapter(adapter_name, result.spec, strict=strict)
+    adapter = _resolve_adapter(adapter_name, result.spec, strict=strict, cache=cache)
     try:
         agent = adapter.build(result.spec)
         trajectory = adapter.run(agent, input)
@@ -334,6 +469,9 @@ def eval_cmd(
         False, "--overwrite-baseline", help="Allow --save-baseline to replace an existing baseline of the same name"
     ),
     compare_baseline: str = typer.Option(None, "--compare", help="Diff this run against a saved baseline; fail on regression"),
+    failed_only: bool = typer.Option(False, "--failed-only", help="Print the full step-by-step trace for every failing case"),
+    parallel: int = typer.Option(1, "--parallel", help="Run up to N eval cases concurrently (default: serial)"),
+    cache: bool = typer.Option(False, "--cache", help="Cache model-call responses under .harness/cache/ (raw_api adapter only)"),
     verbose: bool = typer.Option(False, "--verbose"),
 ) -> None:
     """Run the harness against its eval suite."""
@@ -346,9 +484,9 @@ def eval_cmd(
         console.print("[yellow]No eval cases defined in this harness.[/yellow]")
         raise typer.Exit(1)
 
-    adapter = _resolve_adapter(adapter_name, result.spec, strict=strict)
+    adapter = _resolve_adapter(adapter_name, result.spec, strict=strict, cache=cache)
     try:
-        suite = run_suite(result.spec, adapter, sample=sample)
+        suite = run_suite(result.spec, adapter, sample=sample, max_workers=max(1, parallel))
     except ImportError as e:
         _fail(str(e), verbose, e)
     except Exception as e:  # noqa: BLE001 — provider/auth errors surfaced concisely by default
@@ -360,10 +498,27 @@ def eval_cmd(
     console.print(_render_suite_table(suite))
     console.print(_suite_summary_line(suite))
 
+    if failed_only:
+        failing = [r for r in suite.results if not r.passed]
+        if not failing:
+            console.print("\n[green]✓[/green] no failing cases to show")
+        for r in failing:
+            if r.trajectory is None:
+                console.print(f"\n[bold]== {r.case.id} ==[/bold]  [red]{r.status.value}[/red]: {r.error or 'no trajectory'}")
+                continue
+            render_trajectory(r.trajectory, console, label=r.case.id)
+
     if save_baseline:
         scored_trajectories = {r.case.id: r.trajectory for r in suite.results if r.trajectory is not None}
+        provenance = current_provenance(
+            directory,
+            model_id=result.spec.model.model_id,
+            adapter=adapter_name,
+            harness_name=result.spec.metadata.name,
+            harness_version=result.spec.metadata.version,
+        )
         try:
-            path = save_baseline_fn(directory, save_baseline, scored_trajectories, overwrite=overwrite_baseline)
+            path = save_baseline_fn(directory, save_baseline, scored_trajectories, overwrite=overwrite_baseline, provenance=provenance)
         except FileExistsError as e:
             console.print(f"[red]✗[/red] {e}")
             raise typer.Exit(1)
@@ -376,6 +531,28 @@ def eval_cmd(
             available = list_baselines(directory)
             console.print(f"[red]✗[/red] {e}" + (f" (available: {', '.join(available)})" if available else ""))
             raise typer.Exit(1)
+
+        baseline_prov = load_baseline_provenance(directory, compare_baseline)
+        if baseline_prov.is_legacy:
+            console.print(f"[yellow]![/yellow] baseline '{compare_baseline}': no provenance recorded (legacy baseline)")
+        else:
+            current_model = result.spec.model.model_id
+            current_git_sha = _git_sha_for_warning(directory)
+            mismatches = []
+            if baseline_prov.model_id != current_model:
+                mismatches.append(f"model={baseline_prov.model_id!r} vs {current_model!r}")
+            if baseline_prov.adapter != adapter_name:
+                mismatches.append(f"adapter={baseline_prov.adapter!r} vs {adapter_name!r}")
+            if baseline_prov.harness_version != result.spec.metadata.version:
+                mismatches.append(f"harness_version={baseline_prov.harness_version!r} vs {result.spec.metadata.version!r}")
+            if baseline_prov.git_sha != current_git_sha:
+                mismatches.append(f"git={baseline_prov.git_sha!r} vs {current_git_sha!r}")
+            if mismatches:
+                console.print(
+                    f"[bold red]⚠ baseline '{compare_baseline}' was captured under a different environment:[/bold red] "
+                    + "; ".join(mismatches)
+                    + " — this comparison may reflect environment drift, not a real regression."
+                )
 
         current_cases = [case_result.case for case_result in suite.results]
         missing_case_ids = [case.id for case in current_cases if case.id not in baseline_trajectories]

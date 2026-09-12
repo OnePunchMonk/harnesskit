@@ -26,7 +26,16 @@ client or tool callback is initialized. The base suite runs offline;
 provider-adapter build checks run only with their optional extras. `harness
 replay` re-scores a saved baseline against the current eval suite without
 constructing an adapter at all, so the example harness's fixture baseline is
-a real credential-free demo, not just a config file.
+a real credential-free demo, not just a config file. `harness init --template`
+and `harness templates` expose the six scaffold templates directly, offline
+and deterministically, with no LLM call. `harness show` and `harness eval
+--failed-only` pretty-print a trajectory step by step (llm/tool calls,
+tokens, cost, stop reason) so a failing case is debuggable without opening
+JSON. `harness eval --parallel N` runs independent cases concurrently in a
+bounded thread pool. `--cache` (on `run`/`eval`, raw_api adapter only) caches
+model-call responses on disk under `.harness/cache/`, keyed on (model,
+system prompt, messages, tools), so iterating on scorers/guardrails/eval
+assertions costs nothing on a cache hit.
 
 ## Try it
 
@@ -40,6 +49,8 @@ harness lint examples/react-web-researcher
 harness inspect examples/react-web-researcher
 harness inspect examples/react-web-researcher --adapter raw_api --json
 harness conformance                                # adapter conformance suite
+harness templates                                  # list the six built-in scaffold templates
+harness init my-agent --template coding_agent      # generate from a template, offline, no LLM call
 
 # Re-score a fixture baseline (see examples/react-web-researcher/eval/fixtures/):
 # no adapter, no API key, no network call. Deliberately shows one pass and one
@@ -52,14 +63,18 @@ pip install -e ".[anthropic]"   # add [pydantic-ai] for that adapter
 export ANTHROPIC_API_KEY=...
 
 harness init my-agent                              # minimal skeleton, no API call
-harness init --spec "a support agent that can escalate to a human"  # scaffolder
+harness init --spec "a support agent that can escalate to a human"  # scaffolder (LLM call)
 harness lint examples/react-web-researcher         # static analysis
 harness inspect examples/react-web-researcher
 harness run examples/react-web-researcher --input "What is 2+2?"
+harness run examples/react-web-researcher --input "..." --cache   # cache model calls under .harness/cache/
 harness eval examples/react-web-researcher         # run the eval suite
+harness eval examples/react-web-researcher --parallel 4           # run cases concurrently
 harness eval examples/react-web-researcher --adapter pydantic_ai
-harness eval examples/react-web-researcher --save-baseline v1
-harness eval examples/react-web-researcher --compare v1   # regression gate
+harness eval examples/react-web-researcher --failed-only          # step-by-step trace for failing cases only
+harness eval examples/react-web-researcher --save-baseline v1     # also records model/adapter/git-sha/timestamp
+harness eval examples/react-web-researcher --compare v1   # regression gate; warns loudly on environment drift
+harness show examples/react-web-researcher/.harness/runs/<run-id>.json   # pretty-print a saved trajectory
 harness watch examples/react-web-researcher        # re-lint on every file change
 harness export examples/react-web-researcher -o react.harn
 harness import react.harn --directory ./react-copy # all offline
@@ -117,6 +132,14 @@ documented:
   (pre-schema_version) baseline and run files still load; a baseline saved by
   a newer, incompatible harnesskit raises a specific `IncompatibleArtifactError`
   instead of an opaque crash.
+- **Baseline provenance**: `--save-baseline` also records the model id,
+  adapter, harness name+version, git sha (best-effort, `None` outside a git
+  repo), and timestamp it was captured with. `--compare` loads that record
+  and prints a loud warning — not a quiet log line — when the current run's
+  own model/adapter/harness-version/git-sha differ from it, so an
+  environment change is never silently reported as a harness regression. A
+  legacy (pre-provenance) baseline reports "no provenance recorded (legacy
+  baseline)" instead of silently skipping the check.
 - **Cost accounting** distinguishes observed, estimated, known-zero, and
   unavailable cost (`CostStatus`) — an unknown-model call is reported as
   unavailable, never as `$0`, and `SuiteResult.avg_cost_usd` excludes

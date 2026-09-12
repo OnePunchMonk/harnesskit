@@ -23,10 +23,12 @@ class Template:
     max_turns: int
     cost_ceiling_usd: float
     system_prompt_hint: str
+    description: str = ""  # one-line summary shown by `harness templates`
 
 
 TEMPLATES: dict[str, Template] = {
     "coding_agent": Template(
+        description="An agent that edits code and runs tests in a repo.",
         domain="coding_agent",
         loop_type="react",
         default_tools=[
@@ -41,6 +43,7 @@ TEMPLATES: dict[str, Template] = {
         system_prompt_hint="Always run the test suite before declaring the task complete.",
     ),
     "document_review": Template(
+        description="Reviews documents and flags issues, redacting sensitive data.",
         domain="document_review",
         loop_type="react",
         default_tools=[
@@ -53,6 +56,7 @@ TEMPLATES: dict[str, Template] = {
         system_prompt_hint="Never quote sensitive personal information verbatim in your output; redact it.",
     ),
     "data_extraction": Template(
+        description="Extracts structured data from a source and validates it against a schema.",
         domain="data_extraction",
         loop_type="react",
         default_tools=[
@@ -65,6 +69,7 @@ TEMPLATES: dict[str, Template] = {
         system_prompt_hint="Emit only structured data matching the target schema — no prose commentary.",
     ),
     "customer_support": Template(
+        description="Answers support questions and escalates to a human when unsure.",
         domain="customer_support",
         loop_type="react",
         default_tools=[
@@ -77,6 +82,7 @@ TEMPLATES: dict[str, Template] = {
         system_prompt_hint="Escalate to a human rather than guessing when you are not confident or the user is upset.",
     ),
     "research_agent": Template(
+        description="Searches the web and verifies claims before answering.",
         domain="research_agent",
         loop_type="react",
         default_tools=[
@@ -89,6 +95,7 @@ TEMPLATES: dict[str, Template] = {
         system_prompt_hint="Verify a claim with verify_citation before stating it as fact.",
     ),
     "generic": Template(
+        description="A minimal, unopinionated starting point with no default tools.",
         domain="generic",
         loop_type="react",
         default_tools=[],

@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import random
 import statistics
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from enum import Enum
 
@@ -105,15 +106,31 @@ def run_case(spec: HarnessSpec, case: EvalCase, adapter: HarnessAdapter, agent) 
     return CaseResult(case=case, trajectory=trajectory, scores=scores, status=status)
 
 
-def run_suite(spec: HarnessSpec, adapter: HarnessAdapter, sample: int | None = None) -> SuiteResult:
-    """Run every eval case (or `sample` of them, for a cheap dev-loop pass)."""
+def run_suite(spec: HarnessSpec, adapter: HarnessAdapter, sample: int | None = None, max_workers: int = 1) -> SuiteResult:
+    """Run every eval case (or `sample` of them, for a cheap dev-loop pass).
+
+    Cases are independent and typically I/O-bound (a model/tool call), so
+    `max_workers > 1` runs them concurrently in a bounded thread pool instead
+    of the serial default. Each case's result is keyed by its own case_id
+    (via `spec.eval.cases` order for output, not execution order), and a
+    per-case exception is still caught and recorded as `errored` — it can
+    never propagate out of the pool and kill the whole suite. `max_workers=1`
+    (the default) preserves the exact prior serial behavior.
+    """
     cases = spec.eval.cases
     if sample is not None:
         cases = cases[:sample]
     for case in cases:
         validate_scoring_mode(case)
     agent = adapter.build(spec)
-    results = [run_case(spec, case, adapter, agent) for case in cases]
+
+    if max_workers <= 1:
+        results = [run_case(spec, case, adapter, agent) for case in cases]
+    else:
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            futures = [pool.submit(run_case, spec, case, adapter, agent) for case in cases]
+            results = [f.result() for f in futures]
+
     return SuiteResult(harness_name=spec.metadata.name, results=results)
 
 
