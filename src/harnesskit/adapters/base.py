@@ -8,7 +8,7 @@ framework territory (design doc §13).
 """
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from enum import Enum
 from typing import Any, Protocol
 
@@ -23,6 +23,19 @@ class AdapterCapabilities:
     hook_points: set[str]
     memory_backends: set[str]
     runtime: str = "unknown"
+    # Issue #3 item 1 ("visibility half"): the format declares guardrails,
+    # compaction, model routing, max_tool_calls and five termination types,
+    # but historically only RawAPIAdapter.run() honoured max_turns,
+    # tag_emitted and explicit_tool — silently. These fields let an adapter
+    # state HONESTLY which of those it actually enforces at runtime, so
+    # `inspect_support`/`check_support` can surface the rest as visible gaps
+    # instead of a harness looking "clean" while half its declared safety
+    # net does nothing.
+    enforced_guardrails: set[str] = field(default_factory=set)
+    enforced_termination_types: set[str] = field(default_factory=set)
+    enforced_compaction_strategies: set[str] = field(default_factory=set)
+    supports_routing: bool = False
+    supports_max_tool_calls: bool = False
 
 
 class SupportStatus(str, Enum):
@@ -116,6 +129,32 @@ def inspect_support(spec: HarnessSpec, adapter: HarnessAdapter) -> list[SupportF
     for hook in spec.hooks:
         if hook.point.value not in caps.hook_points:
             add(f"hooks.{hook.point.value}", hook.point.value, False, "hook is ignored at runtime")
+
+    # Issue #3 item 1: declared-but-unenforced gaps. These are a different
+    # flavor from the above — the feature loads and lints fine, it just
+    # silently doesn't run — so the reason text says so explicitly rather
+    # than "not implemented"/"is ignored".
+    def unenforced(field_name: str, requested: str) -> None:
+        add(
+            field_name,
+            requested,
+            False,
+            f"declared but not enforced at runtime by adapter '{caps.runtime}'",
+        )
+
+    for guardrail in spec.guardrails:
+        if guardrail.name not in caps.enforced_guardrails:
+            unenforced(f"guardrails.{guardrail.name}", guardrail.check)
+    for term in spec.termination:
+        if term.type not in caps.enforced_termination_types:
+            unenforced("termination", term.type)
+    if spec.context.compaction.value != "none" and spec.context.compaction.value not in caps.enforced_compaction_strategies:
+        unenforced("context.compaction", spec.context.compaction.value)
+    if spec.model.routing and not caps.supports_routing:
+        unenforced("model.routing", ", ".join(sorted(str(k) for k in spec.model.routing)))
+    if spec.loop.max_tool_calls is not None and not caps.supports_max_tool_calls:
+        unenforced("loop.max_tool_calls", str(spec.loop.max_tool_calls))
+
     return findings
 
 

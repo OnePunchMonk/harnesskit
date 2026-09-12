@@ -85,6 +85,17 @@ class RawAPIAdapter:
             hook_points=set(),
             memory_backends={"in_memory", "none"},
             runtime="raw_api",
+            # run() below actually enforces: stop_tags (tag_emitted),
+            # explicit_tools (explicit_tool), and the `for turn in
+            # range(max_turns)` loop bound (max_turns). idle_detection,
+            # timeout and budget_exhaustion are declared by the format but
+            # never checked here. No guardrail, no compaction strategy,
+            # no model.routing and no loop.max_tool_calls are enforced.
+            enforced_termination_types={"tag_emitted", "explicit_tool", "max_turns"},
+            enforced_guardrails=set(),
+            enforced_compaction_strategies=set(),
+            supports_routing=False,
+            supports_max_tool_calls=False,
         )
 
     def build(self, spec: HarnessSpec) -> RunnableAgent:

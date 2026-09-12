@@ -38,6 +38,17 @@ class PydanticAIAdapter:
             hook_points=set(),
             memory_backends={"none", "in_memory"},
             runtime="pydantic_ai",
+            # run() below only enforces max_turns, via
+            # UsageLimits(request_limit=...). explicit_tool/tag_emitted are
+            # NOT enforced mid-run (see module docstring) — Pydantic AI's own
+            # loop decides when to stop. No guardrail, no compaction
+            # strategy, no model.routing and no loop.max_tool_calls are
+            # enforced either.
+            enforced_termination_types={"max_turns"},
+            enforced_guardrails=set(),
+            enforced_compaction_strategies=set(),
+            supports_routing=False,
+            supports_max_tool_calls=False,
         )
 
     def build(self, spec: HarnessSpec) -> RunnableAgent:

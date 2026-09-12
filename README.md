@@ -95,6 +95,17 @@ provider client, or tool callback is initialized, using `inspect_support()`
 findings (`harness inspect --adapter <name> --json` for the machine-readable
 form).
 
+`inspect_support`/`check_support` also cover a second, distinct kind of gap:
+features that are declared and load/lint fine but are silently not enforced
+at runtime by a given adapter — guardrails, `context.compaction`,
+`model.routing`, `loop.max_tool_calls`, and termination condition types not
+in the adapter's declared `enforced_*` sets. These print as "declared but
+not enforced at runtime by adapter '<runtime>'" rather than "unsupported",
+and `harness lint` flags them too (`declared-but-unenforced`), naming which
+adapter(s) won't honour them. This is visibility only — harnesskit does not
+enforce any of these at runtime yet; see the design doc for the planned
+shared runtime layer.
+
 The conformance suite in `harnesskit.testing.conformance` closes the gap
 between declaration and behavior: it runs a fixed set of deterministic
 scenarios (max-turn termination, explicit-tool/tag-emitted termination, tool

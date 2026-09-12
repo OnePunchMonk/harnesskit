@@ -167,6 +167,37 @@ def rule_tool_coverage(spec: HarnessSpec) -> list[Finding]:
     return findings
 
 
+def rule_declared_but_unenforced(spec: HarnessSpec) -> list[Finding]:
+    """Issue #3 item 1 — a harness can declare guardrails, compaction, or
+    model routing that lint/load happily, but no adapter actually enforces
+    at runtime. This is the "silent failure" the issue calls out: `harness
+    lint` said "No issues found" while a cost_threshold guardrail did
+    nothing. Cross-references every known adapter's declared enforcement
+    (`AdapterCapabilities`) so the lint output names exactly which
+    adapter(s) won't honour each declared feature.
+    """
+    from harnesskit.adapters import ADAPTERS, inspect_support
+
+    gaps: dict[str, list[str]] = {}
+    watched_prefixes = ("guardrails.", "context.compaction", "model.routing", "loop.max_tool_calls")
+    for adapter_name, adapter_cls in ADAPTERS.items():
+        for finding in inspect_support(spec, adapter_cls()):
+            if finding.field.startswith(watched_prefixes) and "not enforced at runtime" in finding.reason:
+                gaps.setdefault(finding.field, []).append(adapter_name)
+
+    findings = []
+    for field_name, adapters in sorted(gaps.items()):
+        findings.append(
+            Finding(
+                rule="declared-but-unenforced",
+                severity=Severity.warning,
+                message=f"{field_name} is declared but not enforced at runtime by adapter(s): {', '.join(sorted(adapters))}.",
+                fix="This is visibility only (issue #3 item 1) — either drop the declaration or accept it currently has no runtime effect.",
+            )
+        )
+    return findings
+
+
 ALL_RULES = [
     rule_missing_termination,
     rule_unbounded_context,
@@ -174,4 +205,5 @@ ALL_RULES = [
     rule_guardrail_completeness,
     rule_cost_ceiling_estimate,
     rule_tool_coverage,
+    rule_declared_but_unenforced,
 ]
