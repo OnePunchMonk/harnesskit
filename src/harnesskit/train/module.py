@@ -155,6 +155,37 @@ class HarnessModule:
         json_pointer_set(doc, target.pointer, value)
         path.write_text(json.dumps(doc, indent=2) + "\n")
 
+    def resolve_edits(self, edits: dict[str, Any]) -> dict[str, Any]:
+        """Turn incremental text operations into full values.
+
+        A text parameter's edit may be a full replacement string or an
+        operation (ACE-style incremental update, which avoids rewriting and
+        eroding a long prompt): ``{"op": "append", "text": ...}``,
+        ``{"op": "prepend", "text": ...}``, or
+        ``{"op": "replace", "old": ..., "new": ...}`` where ``old`` must occur
+        exactly once.
+        """
+        resolved = dict(edits)
+        current = self.state_dict()
+        for name, edit in edits.items():
+            if not isinstance(edit, dict) or name not in current:
+                continue
+            param = self.parameter(name)
+            if param.decl.kind != ParameterKind.text:
+                raise CandidateRejected(f"'{name}': text operations only apply to text parameters")
+            value, op = current[name], edit.get("op")
+            if op in ("append", "prepend") and isinstance(edit.get("text"), str):
+                sep = "" if not value or value.endswith("\n") else "\n"
+                resolved[name] = value + sep + edit["text"] if op == "append" else edit["text"] + "\n" + value
+            elif op == "replace" and isinstance(edit.get("old"), str) and isinstance(edit.get("new"), str):
+                count = value.count(edit["old"]) if edit["old"] else 0
+                if count != 1:
+                    raise CandidateRejected(f"'{name}': replace target must occur exactly once (found {count})")
+                resolved[name] = value.replace(edit["old"], edit["new"])
+            else:
+                raise CandidateRejected(f"'{name}': unsupported text operation {edit!r}")
+        return resolved
+
     def validate_state(self, state: dict[str, Any]) -> dict[str, Any]:
         """Return the full candidate state, or raise CandidateRejected."""
         current = self.state_dict()

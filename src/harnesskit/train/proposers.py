@@ -143,7 +143,14 @@ Propose edits that address the failure patterns in general. Do not
 hard-code answers to individual training cases: candidates are selected on
 separate validation cases and judged on held-out test cases you never see.
 Only edit the listed parameters, respect each parameter's constraints, and
-keep each proposal small and focused.
+keep each proposal small and focused. ATTRIBUTIONS say which failures each
+parameter plausibly affected (a heuristic). PAST CANDIDATES lists edits
+already tried and whether they were kept; do not repeat rejected ideas.
+
+For text parameters, prefer an incremental operation over rewriting the whole
+text, so hard-won details are not lost:
+  {"op": "append", "text": "..."} | {"op": "prepend", "text": "..."} |
+  {"op": "replace", "old": "<exact unique excerpt>", "new": "..."}
 
 Reply with only a JSON object of the form
 {"proposals": [{"rationale": "...", "edits": {"<parameter name>": <new value>}}]}
@@ -160,7 +167,7 @@ def build_proposer_input(parameters: list[Parameter], evidence: Evidence, n: int
         if isinstance(d["value"], str) and len(d["value"]) > max_chars:
             d["value"] = d["value"][:max_chars] + "… [truncated]"
         params.append(d)
-    return (
+    text = (
         f"Return up to {n} proposals.\n\n"
         f"PARAMETERS:\n{json.dumps(params, indent=2)}\n\n"
         f"TRAIN EVIDENCE (pass rate {evidence.pass_rate:.0%}; failures first):\n"
@@ -169,6 +176,11 @@ def build_proposer_input(parameters: list[Parameter], evidence: Evidence, n: int
             indent=2,
         )
     )
+    if evidence.attributions:
+        text += "\n\nATTRIBUTIONS:\n" + json.dumps([a.__dict__ for a in evidence.attributions], indent=2)
+    if evidence.history:
+        text += "\n\nPAST CANDIDATES (most recent last):\n" + json.dumps(evidence.history, indent=2, default=str)
+    return text
 
 
 def parse_proposals(text: str | None) -> tuple[list[Proposal], list[str]]:

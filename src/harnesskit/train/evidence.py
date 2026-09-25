@@ -13,6 +13,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Any
 
 from harnesskit.eval.engine import CaseResult, SuiteResult
+from harnesskit.format.spec import HarnessSpec
 
 
 def _clip(text: str | None, limit: int) -> str | None:
@@ -36,17 +37,68 @@ class CaseEvidence:
 
 
 @dataclass
+class Attribution:
+    """Which failing train cases a parameter plausibly contributed to, and why.
+    A heuristic from trace structure, not a causal proof: it narrows what a
+    proposer should look at for each parameter."""
+
+    parameter: str
+    case_ids: list[str]
+    basis: str
+
+
+@dataclass
 class Evidence:
     split: str
     pass_rate: float
     cases: list[CaseEvidence]
+    attributions: list[Attribution] = field(default_factory=list)
+    history: list[dict[str, Any]] = field(default_factory=list)  # past candidates: edits, status, train score only
 
     @property
     def failures(self) -> list[CaseEvidence]:
         return [c for c in self.cases if not c.passed]
 
     def to_dict(self) -> dict[str, Any]:
-        return {"split": self.split, "pass_rate": self.pass_rate, "cases": [asdict(c) for c in self.cases]}
+        return {
+            "split": self.split,
+            "pass_rate": self.pass_rate,
+            "cases": [asdict(c) for c in self.cases],
+            "attributions": [asdict(a) for a in self.attributions],
+            "history": self.history,
+        }
+
+
+def attribute_failures(parameters, spec: HarnessSpec, evidence: Evidence) -> list[Attribution]:
+    """Route failing cases to the trainable parameters that could have caused them.
+
+    - loop limits (``loop.max_turns``/``loop.max_tool_calls``): failures that
+      stopped on that limit;
+    - a tool's description (``json:<tool schema>#.../description``): failures
+      that called that tool or expected it;
+    - everything else (prompts, files, model, temperature, config values):
+      global — every failure.
+    """
+    tool_by_file = {t.ref: t.name for t in spec.tools if t.source.value == "custom"}
+    failures = evidence.failures
+    out = []
+    for p in parameters:
+        if not p.requires_grad:
+            continue
+        target = p.target
+        if target.kind == "spec" and target.path in ("loop.max_turns", "loop.max_tool_calls"):
+            reason = target.path.split(".")[1]
+            ids = [c.case_id for c in failures if c.stopped_reason == reason]
+            basis = f"failures that stopped on {reason}"
+        elif target.kind == "json" and target.path in tool_by_file:
+            tool = tool_by_file[target.path]
+            ids = [c.case_id for c in failures if tool in c.tool_calls or tool in c.expected.get("tools", [])]
+            basis = f"failures that called or expected tool '{tool}'"
+        else:
+            ids = [c.case_id for c in failures]
+            basis = "global parameter: every failure"
+        out.append(Attribution(p.name, ids, basis))
+    return out
 
 
 def _case_evidence(result: CaseResult, max_chars: int) -> CaseEvidence:

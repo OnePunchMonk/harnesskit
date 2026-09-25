@@ -7,10 +7,11 @@ from harnesskit.adapters.base import (
     check_support,
     inspect_support,
 )
+from harnesskit.adapters.gateway import GatewayAdapter
 from harnesskit.adapters.pydantic_ai_adapter import PydanticAIAdapter
 from harnesskit.adapters.raw_api import RawAPIAdapter
 
-ADAPTERS = {"raw_api": RawAPIAdapter, "pydantic_ai": PydanticAIAdapter}
+ADAPTERS = {"raw_api": RawAPIAdapter, "pydantic_ai": PydanticAIAdapter, "gateway": GatewayAdapter}
 
 __all__ = [
     "HarnessAdapter",
@@ -22,5 +23,6 @@ __all__ = [
     "SupportStatus",
     "RawAPIAdapter",
     "PydanticAIAdapter",
+    "GatewayAdapter",
     "ADAPTERS",
 ]

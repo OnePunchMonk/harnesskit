@@ -114,18 +114,22 @@ def conformance(
     Tests that adapters actually behave the way their declared capabilities
     claim, using scripted clients and fake tools — see `harnesskit.testing`.
     """
-    from harnesskit.testing.conformance import RAW_API_CASES, generate_matrix, run_case
+    from harnesskit.testing.conformance import GATEWAY_CASES, RAW_API_CASES, generate_matrix, run_case
 
     adapter = ADAPTERS["raw_api"]()
     results = [run_case(adapter, case, runtime="raw_api") for case in RAW_API_CASES]
+    gateway = ADAPTERS["gateway"]()
+    results += [run_case(gateway, case, runtime="gateway") for case in GATEWAY_CASES]
 
-    try:
+    import importlib.util
+
+    if importlib.util.find_spec("pydantic_ai") is not None:
         from harnesskit.testing.conformance import PYDANTIC_AI_CASES
 
         pai_adapter = ADAPTERS["pydantic_ai"]()
         results += [run_case(pai_adapter, case, runtime="pydantic_ai") for case in PYDANTIC_AI_CASES]
-    except ImportError:
-        pass  # pydantic-ai not installed; report raw_api only
+    elif not as_json:
+        console.print("[dim]pydantic_ai not installed; skipping its conformance scenarios[/dim]")
 
     if as_json:
         console.print_json(json.dumps([{"case_id": r.case_id, "runtime": r.runtime, "status": r.status, "detail": r.detail} for r in results]))
@@ -867,6 +871,8 @@ def train(
     min_improvement: float = typer.Option(0.0, "--min-improvement", help="Required val pass-rate gain to accept a candidate"),
     seed: int = typer.Option(0, "--seed"),
     parallel: int = typer.Option(1, "--parallel", min=1),
+    selection: str = typer.Option("greedy", "--selection", help="greedy (extend the val-best) | pareto (GEPA-style parent sampling)"),
+    screen_size: int = typer.Option(None, "--screen-size", min=1, help="Screen candidates on this many train cases before full train eval"),
     as_json: bool = typer.Option(False, "--json", help="Print the full report as JSON"),
 ) -> None:
     """Optimize a harness's trainable parameters: propose on train evidence,
@@ -878,8 +884,11 @@ def train(
         module = HarnessModule(directory)
         factory = resolve_adapter_factory(adapter_name)
         proposer = resolve_proposer(proposer_name, adapter=proposer_adapter, model_id=proposer_model)
-        budget = TrainBudget(steps, candidates, max_candidates, max_cost, allow_unmetered)
-        trainer = Trainer(module, factory, proposer, out, budget=budget, seed=seed, min_improvement=min_improvement, max_workers=parallel)
+        budget = TrainBudget(steps, candidates, max_candidates, max_cost, allow_unmetered, screen_size)
+        trainer = Trainer(
+            module, factory, proposer, out, budget=budget, seed=seed, min_improvement=min_improvement,
+            max_workers=parallel, selection=selection,
+        )
         result = trainer.fit()
     except (HarnessLoadError, ParameterError, TrainError, ValueError, OSError) as e:
         _fail(str(e), False)
@@ -911,6 +920,37 @@ def train(
     verdict_color = {"improved": "green", "inconclusive": "yellow"}.get(result.verdict, "red")
     console.print(f"[{verdict_color}]verdict: {result.verdict}[/{verdict_color}] — {result.verdict_reason}")
     console.print(f"report: {out / 'train_report.json'}")
+
+
+skill_app = typer.Typer(no_args_is_help=True, help="The harnesskit Agent Skill: teaches a coding assistant to abstract a use case into a harness")
+app.add_typer(skill_app, name="skill")
+
+
+def _skill_dir() -> Path:
+    return Path(__file__).resolve().parent.parent / "skill"
+
+
+@skill_app.command("install")
+def skill_install(
+    dest: Path = typer.Option(Path(".claude/skills"), "--dest", help="Skills directory of your coding assistant (e.g. .claude/skills, ~/.codex/skills)"),
+    force: bool = typer.Option(False, "--force", help="Replace an existing harnesskit skill"),
+) -> None:
+    """Copy the harnesskit skill (SKILL.md + references) into DEST/harnesskit."""
+    import shutil
+
+    target = dest / "harnesskit"
+    if target.exists():
+        if not force:
+            _fail(f"{target} already exists; pass --force to replace it", False)
+        shutil.rmtree(target)
+    shutil.copytree(_skill_dir(), target, ignore=shutil.ignore_patterns("__pycache__", "*.py", "*.pyc"))
+    console.print(f"[green]✓[/green] Installed the harnesskit skill to {target}/")
+
+
+@skill_app.command("show")
+def skill_show() -> None:
+    """Print SKILL.md."""
+    console.print((_skill_dir() / "SKILL.md").read_text(), markup=False, highlight=False)
 
 
 if __name__ == "__main__":

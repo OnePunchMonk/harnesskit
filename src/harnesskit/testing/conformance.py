@@ -493,3 +493,129 @@ def generate_matrix(results: list[ScenarioResult]) -> str:
             row.append(symbol[result.status] if result else "—")
         lines.append("| " + " | ".join(row) + " |")
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# gateway-shaped cases: the same scenarios as RAW_API_CASES, with each scripted
+# Anthropic response translated into an OpenAI chat-completions body and served
+# by FakeChatClient — plus gateway-specific cost/served-model/argument cases.
+# ---------------------------------------------------------------------------
+
+
+def _as_gateway(build: Callable[[], tuple[RunnableAgent, str]]) -> Callable[[], tuple[RunnableAgent, str]]:
+    from harnesskit.adapters.gateway import to_openai_tool
+    from harnesskit.testing.fakes import FakeChatClient, chat_body_from_fake_response
+
+    def _build() -> tuple[RunnableAgent, str]:
+        agent, input_text = build()
+        script = agent.handle["client"].messages.responses
+        client = FakeChatClient([chat_body_from_fake_response(r) for r in script])
+        handle = {
+            "client": client,
+            "tool_schemas": [to_openai_tool(s) for s in agent.handle["tool_schemas"]],
+            "callbacks": agent.handle["callbacks"],
+        }
+        return RunnableAgent(spec=agent.spec, handle=handle), input_text
+
+    return _build
+
+
+def _gateway_agent(spec: HarnessSpec, bodies: list[dict], callbacks: dict, headers: list[dict] | None = None) -> RunnableAgent:
+    from harnesskit.adapters.gateway import to_openai_tool
+    from harnesskit.testing.fakes import FakeChatClient
+
+    tools = [to_openai_tool({"name": t.name, "input_schema": {"type": "object", "properties": {}}}) for t in spec.tools]
+    return RunnableAgent(spec=spec, handle={"client": FakeChatClient(bodies, headers), "tool_schemas": tools, "callbacks": callbacks})
+
+
+def _gw_build_observed_cost() -> tuple[RunnableAgent, str]:
+    from harnesskit.testing.fakes import chat_body
+
+    spec = make_spec()
+    body = chat_body("answer", model="served/alias-target", usage={"prompt_tokens": 5, "completion_tokens": 7, "cost": 0.0012})
+    return _gateway_agent(spec, [body], {}), "go"
+
+
+def _gw_check_observed_cost(t: Trajectory) -> None:
+    step = t.steps[0]
+    assert step.cost_status is not None and step.cost_status.value == "observed", step.cost_status
+    assert step.cost_usd == 0.0012
+    assert step.note and "served_model=served/alias-target" in step.note, "the gateway's served model must be recorded"
+
+
+def _gw_build_unknown_cost() -> tuple[RunnableAgent, str]:
+    from harnesskit.testing.fakes import chat_body
+
+    spec = make_spec()
+    spec.model.model_id = "some-gateway/unpriced-model"
+    return _gateway_agent(spec, [chat_body("answer")], {}), "go"
+
+
+def _gw_check_unknown_cost(t: Trajectory) -> None:
+    step = t.steps[0]
+    assert step.cost_usd is None and step.cost_status is not None and step.cost_status.value == "unavailable", (
+        "an unpriced gateway model must report unavailable cost, never $0"
+    )
+
+
+def _gw_build_bad_arguments() -> tuple[RunnableAgent, str]:
+    from harnesskit.testing.fakes import chat_body
+
+    spec = make_spec(tools=[_NOOP_TOOL])
+    bad = chat_body(None, [("noop", {})])
+    bad["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"] = "{not json"
+    return _gateway_agent(spec, [bad, chat_body("done")], {"noop": echo_tool()}), "go"
+
+
+def _gw_check_bad_arguments(t: Trajectory) -> None:
+    calls = t.tool_calls
+    assert len(calls) == 1 and calls[0].tool_result and "invalid tool arguments" in calls[0].tool_result
+    assert t.final_output == "done"
+
+
+def _gw_build_max_tool_calls() -> tuple[RunnableAgent, str]:
+    from harnesskit.testing.fakes import chat_body
+
+    spec = make_spec(max_turns=10, tools=[_NOOP_TOOL])
+    spec.loop.max_tool_calls = 2
+    bodies = [chat_body(None, [("noop", {"i": i})]) for i in range(5)]
+    return _gateway_agent(spec, bodies, {"noop": echo_tool()}), "go"
+
+
+def _gw_check_max_tool_calls(t: Trajectory) -> None:
+    assert t.stopped_reason == "max_tool_calls", t.stopped_reason
+    assert len(t.tool_calls) == 2
+
+
+GATEWAY_CASES: list[ConformanceCase] = [
+    ConformanceCase(c.id, c.capability, c.description, _as_gateway(c.build), c.check) for c in RAW_API_CASES
+] + [
+    ConformanceCase(
+        "observed_cost_and_served_model",
+        "cost",
+        "a gateway-reported cost is recorded as observed, and the served model is recorded",
+        _gw_build_observed_cost,
+        _gw_check_observed_cost,
+    ),
+    ConformanceCase(
+        "unpriced_model_cost_unavailable",
+        "cost",
+        "an unpriced model with no reported cost is 'unavailable', never $0",
+        _gw_build_unknown_cost,
+        _gw_check_unknown_cost,
+    ),
+    ConformanceCase(
+        "invalid_tool_arguments",
+        "tools",
+        "malformed tool-call JSON surfaces as an error result the model can see",
+        _gw_build_bad_arguments,
+        _gw_check_bad_arguments,
+    ),
+    ConformanceCase(
+        "max_tool_calls",
+        "loop.max_tool_calls",
+        "run() stops before exceeding loop.max_tool_calls",
+        _gw_build_max_tool_calls,
+        _gw_check_max_tool_calls,
+    ),
+]

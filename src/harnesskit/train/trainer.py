@@ -41,7 +41,7 @@ from typing import Any, Callable
 from harnesskit.adapters.base import HarnessAdapter, check_support
 from harnesskit.eval.engine import ABResult, SuiteResult, compare, run_suite
 from harnesskit.format.spec import HarnessSpec
-from harnesskit.train.evidence import collect_evidence
+from harnesskit.train.evidence import attribute_failures, collect_evidence
 from harnesskit.train.module import CandidateRejected, HarnessModule
 from harnesskit.train.proposers import Proposer
 from harnesskit.trace.schema import CostStatus
@@ -91,6 +91,7 @@ class TrainBudget:
     max_candidates: int | None = None
     max_cost_usd: float | None = None
     allow_unmetered: bool = False
+    screen_size: int | None = None  # evaluate candidates on this many train cases first; finish train only if not worse
 
 
 @dataclass
@@ -148,6 +149,7 @@ class CandidateRecord:
     reason: str
     diff: str = ""
     directory: str | None = None
+    screen: SplitScore | None = None
     train: SplitScore | None = None
     val: SplitScore | None = None
 
@@ -211,6 +213,61 @@ class TrainResult:
         }
 
 
+@dataclass
+class _Member:
+    """An evaluated harness that can serve as a parent for new proposals."""
+
+    id: str
+    module: HarnessModule
+    train_suite: SuiteResult
+    train_score: SplitScore
+
+    def case_vector(self) -> dict[str, float]:
+        return {r.case.id: float(r.passed) for r in self.train_suite.results}
+
+
+def pareto_front(pool: list[_Member]) -> list[_Member]:
+    """Members not dominated on per-case train outcomes (GEPA-style)."""
+    vectors = [m.case_vector() for m in pool]
+    front = []
+    for i, v in enumerate(vectors):
+        dominated = any(
+            all(o[c] >= v[c] for c in v) and any(o[c] > v[c] for c in v)
+            for j, o in enumerate(vectors)
+            if j != i
+        )
+        if not dominated:
+            front.append(pool[i])
+    return front
+
+
+def _sample_pareto(pool: list[_Member], rng: random.Random) -> _Member:
+    """Sample a parent from the Pareto front, weighted by how many train cases
+    it is among the best on — so a candidate that alone solves some case keeps
+    being explored even when its average is lower."""
+    front = pareto_front(pool)
+    vectors = {m.id: m.case_vector() for m in front}
+    cases = next(iter(vectors.values())).keys()
+    best = {c: max(v[c] for v in vectors.values()) for c in cases}
+    weights = [sum(1 for c in cases if best[c] > 0 and vectors[m.id][c] == best[c]) for m in front]
+    if not any(weights):
+        return rng.choice(front)
+    return rng.choices(front, weights=weights, k=1)[0]
+
+
+def _history_entry(record: CandidateRecord) -> dict[str, Any]:
+    """What a proposer may see about a past candidate: its edits, outcome, and
+    train score. Val scores are deliberately withheld."""
+    return {
+        "id": record.id,
+        "parent": record.parent,
+        "edits": {k: (v[:300] + "…" if isinstance(v, str) and len(v) > 300 else v) for k, v in record.edits.items()},
+        "status": record.status,
+        "reason": record.reason if record.val is None else record.status,
+        "train_pass_rate": record.train.pass_rate if record.train else None,
+    }
+
+
 def _state_key(state: dict[str, Any]) -> str:
     return hashlib.sha256(json.dumps(state, sort_keys=True, default=str).encode()).hexdigest()
 
@@ -234,7 +291,11 @@ class Trainer:
         seed: int = 0,
         min_improvement: float = 0.0,
         max_workers: int = 1,
+        selection: str = "greedy",
+        history_size: int = 20,
     ):
+        if selection not in ("greedy", "pareto"):
+            raise TrainError(f"selection must be 'greedy' or 'pareto', got {selection!r}")
         self.module = module
         self.adapter_factory = adapter_factory
         self.proposer = proposer
@@ -243,6 +304,8 @@ class Trainer:
         self.seed = seed
         self.min_improvement = min_improvement
         self.max_workers = max_workers
+        self.selection = selection
+        self.history_size = history_size
         self.ledger = SpendLedger()
         self.notes: list[str] = []
         self._largest_eval_cost = 0.0
@@ -286,31 +349,39 @@ class Trainer:
         if self.work_dir.exists() and any(self.work_dir.iterdir()):
             raise TrainError(f"work directory is not empty: {self.work_dir}")
         (self.work_dir / "candidates").mkdir(parents=True, exist_ok=True)
+        self._history_path = self.work_dir / "history.jsonl"
         rng = random.Random(self.seed)
         warnings = check_support(self.module.spec, self.adapter_factory(self.module.spec))
         self.notes += [f"adapter: {w}" for w in warnings]
+        screen = self.budget.screen_size
+        if screen is not None and screen >= len(plan.train):
+            self.notes.append(f"screen_size={screen} >= train size; screening disabled")
+            screen = None
 
         initial = self.module
         init_train = self._evaluate(initial, plan.train, "initial/train")
         init_val = self._evaluate(initial, plan.val, "initial/val")
-        best, best_id = initial, "initial"
-        best_train_suite = init_train
-        best_train, best_val = SplitScore.of(init_train), SplitScore.of(init_val)
-        initial_train, initial_val = best_train, best_val
+        root = _Member("initial", initial, init_train, SplitScore.of(init_train))
+        pool: list[_Member] = [root]
+        best, best_val = root, SplitScore.of(init_val)
+        initial_train, initial_val = root.train_score, best_val
         seen = {_state_key(initial.state_dict()): "initial"}
         records: list[CandidateRecord] = []
         stop_reason = f"completed {self.budget.max_steps} step(s)"
         counter = 0
 
         for step in range(1, self.budget.max_steps + 1):
-            evidence = collect_evidence(best_train_suite, split="train")
+            parent = best if self.selection == "greedy" else _sample_pareto(pool, rng)
+            evidence = collect_evidence(parent.train_suite, split="train")
+            evidence.attributions = attribute_failures(parent.module.parameters(), parent.module.spec, evidence)
+            evidence.history = [_history_entry(r) for r in records[-self.history_size :]] if self.history_size else []
             n = self.budget.candidates_per_step
             if self.budget.max_candidates is not None:
                 n = min(n, self.budget.max_candidates - counter)
             if n <= 0:
                 stop_reason = f"reached max_candidates={self.budget.max_candidates}"
                 break
-            batch = self.proposer.propose(best.parameters(), evidence, n, rng)
+            batch = self.proposer.propose(parent.module.parameters(), evidence, n, rng)
             self.ledger.add("proposal", f"step{step}/{self.proposer.name}", batch.cost_usd, batch.cost_status.value)
             self.notes += [f"step {step}: {note}" for note in batch.notes]
             if not batch.proposals:
@@ -320,48 +391,17 @@ class Trainer:
             for proposal in batch.proposals:
                 counter += 1
                 cid = f"c{counter:03d}"
-                record = CandidateRecord(cid, step, best_id, self.proposer.name, proposal.edits, proposal.rationale, "invalid", "")
+                record = CandidateRecord(cid, step, parent.id, self.proposer.name, proposal.edits, proposal.rationale, "invalid", "")
                 records.append(record)
-                try:
-                    merged = best.validate_state(proposal.edits)
-                except CandidateRejected as e:
-                    record.reason = str(e)
-                    continue
-                record.diff = "".join(c.render() for c in best.diff(merged))
-                key = _state_key(merged)
-                if key == _state_key(best.state_dict()):
-                    record.reason = "no-op: proposal does not change any parameter"
-                    continue
-                if key in seen:
-                    record.status, record.reason = "duplicate", f"same state as {seen[key]}; not re-evaluated"
-                    continue
-                stopped = self._admit(f"candidate {cid}")
+                stopped, member = self._try_candidate(record, parent, proposal.edits, plan, seen, screen, rng)
+                if member is not None:
+                    pool.append(member)
+                    if record.val is not None and self._better(record.val, best_val):
+                        record.status, record.reason = "accepted", f"val {best_val.pass_rate:.2f} -> {record.val.pass_rate:.2f}"
+                        best, best_val = member, record.val
+                self._log(record)
                 if stopped:
-                    record.status, record.reason = "rejected", "not evaluated: " + stopped
                     break
-                try:
-                    candidate = best.materialize(merged, self.work_dir / "candidates" / cid)
-                except CandidateRejected as e:
-                    record.reason = str(e)
-                    continue
-                seen[key] = cid
-                record.directory = str(candidate.directory)
-                train_suite = self._evaluate(candidate, plan.train, f"{cid}/train")
-                record.train = SplitScore.of(train_suite)
-                if record.train.key() < best_train.key():
-                    record.status, record.reason = "rejected", "train objective decreased; val not evaluated"
-                    continue
-                stopped = self._admit(f"candidate {cid} val")
-                if stopped:
-                    record.status, record.reason = "rejected", "val not evaluated: " + stopped
-                    break
-                record.val = SplitScore.of(self._evaluate(candidate, plan.val, f"{cid}/val"))
-                if self._better(record.val, best_val):
-                    record.status, record.reason = "accepted", f"val {best_val.pass_rate:.2f} -> {record.val.pass_rate:.2f}"
-                    best, best_id, best_train_suite = candidate, cid, train_suite
-                    best_train, best_val = record.train, record.val
-                else:
-                    record.status, record.reason = "rejected", "no val improvement over current best"
                 if self.budget.max_candidates is not None and counter >= self.budget.max_candidates:
                     break
             if stopped:
@@ -371,7 +411,73 @@ class Trainer:
                 stop_reason = f"reached max_candidates={self.budget.max_candidates}"
                 break
 
-        return self._finish(plan, initial, best, best_id, initial_train, initial_val, best_train, best_val, records, stop_reason)
+        return self._finish(plan, initial, best.module, best.id, initial_train, initial_val, best.train_score, best_val, records, stop_reason)
+
+    def _try_candidate(self, record, parent, edits, plan, seen, screen, rng) -> tuple[str | None, _Member | None]:
+        """Validate, materialize, and evaluate one proposal. Returns a stop
+        reason when the budget halts training, and a new pool member when the
+        candidate's full train score is not below its parent's."""
+        try:
+            merged = parent.module.validate_state(parent.module.resolve_edits(edits))
+        except CandidateRejected as e:
+            record.reason = str(e)
+            return None, None
+        record.diff = "".join(c.render() for c in parent.module.diff(merged))
+        key = _state_key(merged)
+        if key == _state_key(parent.module.state_dict()):
+            record.reason = "no-op: proposal does not change any parameter"
+            return None, None
+        if key in seen:
+            record.status, record.reason = "duplicate", f"same state as {seen[key]}; not re-evaluated"
+            return None, None
+        stopped = self._admit(f"candidate {record.id}")
+        if stopped:
+            record.status, record.reason = "rejected", "not evaluated: " + stopped
+            return stopped, None
+        try:
+            candidate = parent.module.materialize(merged, self.work_dir / "candidates" / record.id)
+        except CandidateRejected as e:
+            record.reason = str(e)
+            return None, None
+        seen[key] = record.id
+        record.directory = str(candidate.directory)
+        record.status = "rejected"
+
+        parent_by_id = {r.case.id: r for r in parent.train_suite.results}
+        if screen is not None:
+            screen_ids = sorted(rng.sample(plan.train, screen), key=plan.train.index)
+            screen_suite = self._evaluate(candidate, screen_ids, f"{record.id}/screen")
+            record.screen = SplitScore.of(screen_suite)
+            parent_screen = SplitScore.of(SuiteResult(parent.train_suite.harness_name, [parent_by_id[i] for i in screen_ids]))
+            if record.screen.key() < parent_screen.key():
+                record.reason = f"screen: {record.screen.pass_rate:.2f} < parent {parent_screen.pass_rate:.2f} on {screen} train case(s)"
+                return None, None
+            rest = [i for i in plan.train if i not in set(screen_ids)]
+            stopped = self._admit(f"candidate {record.id} train")
+            if stopped:
+                record.reason = "train not completed: " + stopped
+                return stopped, None
+            rest_suite = self._evaluate(candidate, rest, f"{record.id}/train-rest")
+            by_id = {r.case.id: r for r in screen_suite.results + rest_suite.results}
+            train_suite = SuiteResult(screen_suite.harness_name, [by_id[i] for i in plan.train])
+        else:
+            train_suite = self._evaluate(candidate, plan.train, f"{record.id}/train")
+        record.train = SplitScore.of(train_suite)
+        if record.train.key() < parent.train_score.key():
+            record.reason = "train objective decreased; val not evaluated"
+            return None, None
+        member = _Member(record.id, candidate, train_suite, record.train)
+        stopped = self._admit(f"candidate {record.id} val")
+        if stopped:
+            record.reason = "val not evaluated: " + stopped
+            return stopped, member
+        record.val = SplitScore.of(self._evaluate(candidate, plan.val, f"{record.id}/val"))
+        record.reason = "no val improvement over current best"
+        return None, member
+
+    def _log(self, record: CandidateRecord) -> None:
+        with self._history_path.open("a") as f:
+            f.write(json.dumps(asdict(record), default=str) + "\n")
 
     def _finish(self, plan, initial, best, best_id, initial_train, initial_val, best_train, best_val, records, stop_reason) -> TrainResult:
         test_initial = test_best = comparison = None

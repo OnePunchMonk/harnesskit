@@ -141,6 +141,8 @@ branch must be integrated or explicitly stacked before dependent work starts.
 | HK-18 | Second-runtime qualification and replication | HK-06, HK-08, HK-10, HK-14 | TODO | |
 | HK-19 | Bounded harness optimizer | HK-11, HK-15, HK-16, HK-17, HK-18 | TODO | |
 | HK-20 | Release documentation and external pilot | HK-07, HK-08, HK-10, HK-14 | TODO | |
+| HK-22 | OpenAI-compatible gateway adapter and abstractor Agent Skill | HK-03, HK-06 | DONE (on branch) | `claude/admiring-lovelace-o638f6`: `GatewayAdapter` + gateway conformance cases, `harness skill install`; 152 passed, 3 skipped |
+| HK-23 | Train-loop upgrades: attribution, memory, text ops, Pareto, screening | HK-21 | DONE (on branch) | `claude/admiring-lovelace-o638f6`; offline-tested only, no live measurement |
 | HK-21 | Trainable harness parameters and bounded train loop | HK-02, HK-03 | DONE (on branch) | `claude/admiring-lovelace-o638f6`: `trainable:` + `split:` format, `harnesskit.train`, `harness params`/`harness train`, offline `examples/trainable_qa`; 125 passed, 3 skipped |
 
 ### HK-01 — Baseline verification and offline CI
@@ -433,6 +435,34 @@ search strategies beyond greedy hill-climbing.
 Branch / integration status: implemented on `claude/admiring-lovelace-o638f6`;
 provides the optimizer core HK-19 needs, but HK-19's measured comparisons
 remain TODO.
+
+### HK-22 — OpenAI-compatible gateway adapter and abstractor Agent Skill
+Status: DONE on branch `claude/admiring-lovelace-o638f6` (not merged)
+Scope: `adapters/gateway.py` (stdlib HTTP, injectable `ChatClient`) with
+observed/estimated/unavailable cost, served-model recording, and enforcement
+of max_turns/max_tool_calls/explicit_tool/tag_emitted. `GATEWAY_CASES` reuse
+every raw_api conformance scenario plus gateway-specific ones.
+`src/harnesskit/skill/` ships SKILL.md with references; `harness skill
+install|show`. Also fixed `harness conformance` exiting 1 when pydantic-ai
+isn't installed.
+Evidence: `tests/test_gateway_adapter.py` (scripted client plus a localhost
+HTTP server: auth header, LiteLLM cost header, HTTP 429/500 as errored
+cases, CLI eval) and `tests/test_skill.py` (frontmatter, referenced
+commands exist, the format reference validates, install). The wheel build
+includes the skill files. Full suite: 152 passed, 3 skipped.
+Limitations: no streaming, no retry/backoff on 429, and no response cache
+for the gateway adapter. Not yet run against a live gateway (no authorized
+budget).
+
+### HK-23 — Train-loop upgrades
+Status: DONE on branch `claude/admiring-lovelace-o638f6` (not merged)
+Scope: heuristic per-parameter failure attribution; optimizer memory for
+proposers (edits, status, and train score only; val withheld) plus
+`history.jsonl`; ACE-style incremental text ops; GEPA-style
+`selection="pareto"`; `screen_size` minibatch screening.
+Evidence: 7 new tests in `tests/test_train.py`.
+Limitations: none of these is shown to improve outcomes yet. That needs the
+budgeted live comparison from HK-19.
 
 ## User-added tasks
 

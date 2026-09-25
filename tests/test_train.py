@@ -374,3 +374,106 @@ def test_default_llm_proposer_runs_through_raw_api_adapter_offline(tmp_path):
     assert client.calls[0]["system"].startswith("You improve an AI agent harness")
     entry = [e for e in result.spend.entries if e["kind"] == "proposal"][0]
     assert entry["cost_status"] == "estimated" and entry["cost_usd"] > 0  # proposal spend is counted
+
+
+# -- training-loop upgrades: text ops, attribution, pareto, screening, memory ----
+
+def test_incremental_text_operations(tmp_path):
+    d = make_harness(tmp_path, [{"name": "prompt", "target": "scaffold.system_prompt"}])
+    module = HarnessModule(d)
+    assert module.resolve_edits({"prompt": {"op": "append", "text": "Cite sources."}})["prompt"] == "Be helpful.\nCite sources."
+    assert module.resolve_edits({"prompt": {"op": "prepend", "text": "Rule 0."}})["prompt"] == "Rule 0.\nBe helpful.\n"
+    assert module.resolve_edits({"prompt": {"op": "replace", "old": "helpful", "new": "precise"}})["prompt"] == "Be precise.\n"
+    with pytest.raises(CandidateRejected, match="exactly once"):
+        module.resolve_edits({"prompt": {"op": "replace", "old": "missing", "new": "x"}})
+    with pytest.raises(CandidateRejected, match="unsupported"):
+        module.resolve_edits({"prompt": {"op": "rewrite"}})
+
+
+def test_text_ops_flow_through_the_trainer(tmp_path):
+    proposer = ScriptedProposer([Proposal({"min_overlap": 2, "answer_mode": "best_sentence"})])
+    result = _trainer(tmp_path, proposer, TrainBudget(max_steps=1, candidates_per_step=1)).fit()
+    assert result.candidates[0].status == "accepted"
+    # system_prompt is frozen in the example, so a text op on it is rejected before evaluation
+    proposer = ScriptedProposer([Proposal({"system_prompt": {"op": "append", "text": "x"}})])
+    result = _trainer(tmp_path, proposer, TrainBudget(max_steps=1, candidates_per_step=1), name="w2").fit()
+    assert result.candidates[0].status == "invalid" and "frozen" in result.candidates[0].reason
+
+
+def test_failure_attribution_routes_by_trace_structure(tmp_path):
+    from harnesskit.train.evidence import CaseEvidence, Evidence, attribute_failures
+
+    d = make_harness(
+        tmp_path,
+        [
+            {"name": "turns", "target": "loop.max_turns", "kind": "int", "min": 1, "max": 10},
+            {"name": "search_desc", "target": "json:tools/search.json#/description"},
+            {"name": "prompt", "target": "scaffold.system_prompt"},
+        ],
+    )
+    module = HarnessModule(d)
+    ev = Evidence("train", 0.0, [
+        CaseEvidence("a", "q", False, "ok", {}, "x", stopped_reason="max_turns"),
+        CaseEvidence("b", "q", False, "ok", {}, "x", tool_calls=["search"]),
+        CaseEvidence("c", "q", True, "ok", {}, "x", tool_calls=["search"]),
+    ])
+    by_name = {a.parameter: a.case_ids for a in attribute_failures(module.parameters(), module.spec, ev)}
+    assert by_name == {"turns": ["a"], "search_desc": ["b"], "prompt": ["a", "b"]}
+
+
+def test_pareto_front_keeps_case_specialists():
+    from harnesskit.eval.engine import CaseResult, SuiteResult
+    from harnesskit.eval.scorers import Score
+    from harnesskit.format.spec import EvalCase
+    from harnesskit.train.trainer import SplitScore, _Member, pareto_front
+
+    def member(name, passes):
+        results = [
+            CaseResult(EvalCase(id=cid, input="x"), None, [Score("s", float(ok), ok, "")]) for cid, ok in passes.items()
+        ]
+        suite = SuiteResult("h", results)
+        return _Member(name, None, suite, SplitScore.of(suite))
+
+    a = member("a", {"1": True, "2": True, "3": False})
+    b = member("b", {"1": False, "2": False, "3": True})  # lower average but the only one solving case 3
+    c = member("c", {"1": True, "2": False, "3": False})  # dominated by a
+    assert {m.id for m in pareto_front([a, b, c])} == {"a", "b"}
+
+
+def test_pareto_selection_trains_example(tmp_path):
+    trainer = Trainer(
+        HarnessModule(EXAMPLE), resolve_adapter_factory(FACTORY), RandomSearchProposer(), tmp_path / "w",
+        budget=TrainBudget(max_steps=5, candidates_per_step=3), selection="pareto",
+    )
+    result = trainer.fit()
+    assert result.verdict in ("improved", "inconclusive")
+    assert any(c.parent != "initial" for c in result.candidates)
+    with pytest.raises(TrainError, match="selection"):
+        Trainer(HarnessModule(EXAMPLE), resolve_adapter_factory(FACTORY), RandomSearchProposer(), tmp_path / "x", selection="bogus")
+
+
+def test_screening_rejects_on_a_train_minibatch_before_full_evaluation(tmp_path):
+    proposer = ScriptedProposer([Proposal({"answer_mode": "best_sentence"}), Proposal({"strip_stopwords": True})])
+    result = _trainer(tmp_path, proposer, TrainBudget(max_steps=1, candidates_per_step=2, screen_size=2)).fit()
+    labels = [e["label"] for e in result.spend.entries if e["kind"] == "evaluation"]
+    assert "c001/screen" in labels
+    for c in result.candidates:
+        assert c.screen is not None and c.screen.n == 2
+        if c.reason.startswith("screen:"):
+            assert c.train is None  # the rest of train was never run
+
+
+def test_history_memory_is_train_only_and_logged(tmp_path):
+    histories: list[list[dict]] = []
+
+    def spy(params, evidence, n, rng):
+        histories.append(evidence.history)
+        return [Proposal({"min_overlap": len(histories)})]
+
+    _trainer(tmp_path, FunctionProposer(spy), TrainBudget(max_steps=3, candidates_per_step=1)).fit()
+    assert histories[0] == [] and len(histories[2]) == 2
+    for entry in histories[2]:
+        assert "val" not in json.dumps(entry).lower().replace("invalid", "")  # val scores are withheld
+        assert "train_pass_rate" in entry
+    lines = (tmp_path / "work" / "history.jsonl").read_text().splitlines()
+    assert [json.loads(line)["id"] for line in lines] == ["c001", "c002", "c003"]

@@ -58,6 +58,15 @@ harness init my-agent --template coding_agent      # generate from a template, o
 harness replay examples/react-web-researcher \
   --baseline examples/react-web-researcher/eval/fixtures/fixture-demo.baseline.json
 
+# Any model behind an OpenAI-compatible AI gateway (LiteLLM, OpenRouter, Portkey,
+# Vercel AI Gateway, vLLM, Ollama, ...). No provider SDK needed.
+export HARNESSKIT_GATEWAY_BASE_URL=https://openrouter.ai/api/v1   # or http://localhost:4000 for LiteLLM
+export HARNESSKIT_GATEWAY_API_KEY=...
+harness eval examples/react-web-researcher --adapter gateway
+
+# Let your coding assistant do the abstracting: install the harnesskit Agent Skill.
+harness skill install --dest .claude/skills        # any skills-compatible assistant; see `harness skill show`
+
 # Optional provider adapters. Install only the adapter you intend to run.
 pip install -e ".[anthropic]"   # add [pydantic-ai] for that adapter
 export ANTHROPIC_API_KEY=...
@@ -171,6 +180,51 @@ compare) for direct `import harnesskit` use — see the module docstring in
 `src/harnesskit/__init__.py` for the full list. Everything else in
 `harnesskit.*` remains CLI-only/internal and may change without notice.
 
+## Gateway models and the abstractor workflow
+
+The intended workflow is:
+1. A team picks a cheap, low-latency model behind an AI gateway.
+2. They describe their business use case to a coding assistant.
+3. The coding assistant, acting as the **abstractor** (not the doer), turns
+   that description into a harness.
+4. harnesskit does the rest.
+
+Two pieces support this workflow:
+
+- **`GatewayAdapter`** (`--adapter gateway`) runs a harness against any
+  OpenAI-compatible Chat Completions endpoint. It uses only the standard
+  library and needs no SDK.
+  - Configuration comes from `HARNESSKIT_GATEWAY_BASE_URL` and
+    `HARNESSKIT_GATEWAY_API_KEY`, falling back to `OPENAI_BASE_URL` and
+    `OPENAI_API_KEY`. It is read at build time, so `harness inspect` never
+    needs credentials.
+  - It enforces `max_turns`, `max_tool_calls`, and `explicit_tool` and
+    `tag_emitted` termination.
+  - Each step records the model the gateway actually served.
+  - Cost is **observed** when the gateway reports it (OpenRouter's
+    `usage.cost`, LiteLLM's `x-litellm-response-cost` header). Otherwise it
+    is estimated from the pricing table, or marked unavailable. It is never
+    reported as `$0`.
+  - A failed request stays on the trace, and the case counts as errored.
+  - `harness conformance` runs every raw_api scenario against the gateway
+    adapter. It also runs gateway-specific scenarios for cost, served model,
+    malformed tool arguments, and `max_tool_calls`.
+- **The harnesskit Agent Skill** (`harness skill install`, source in
+  `src/harnesskit/skill/`) teaches a skills-compatible coding assistant the
+  abstractor workflow:
+  1. Pin down the use case and mechanical success criteria.
+  2. Scaffold the harness from a template.
+  3. Write bounded tools.
+  4. Write an outcome-asserted eval suite with splits, and a human-review
+     list for uncertain expectations.
+  5. Declare `trainable:` parameters.
+  6. Verify with `lint`, `inspect`, `params`, and `conformance`.
+  7. Get an explicit budget, then run `eval` and `train` on the gateway.
+  8. Report the verdict as is.
+
+  The skill forbids hard-coding answers, editing eval cases to pass, and
+  spending money without a budget.
+
 ## Training a harness (`requires_grad` for harness components) — experimental
 
 A harness can declare which of its components an optimizer may edit, the
@@ -231,6 +285,33 @@ unavailable, training stops rather than pretend the cap is enforced, unless
 `--allow-unmetered` is passed. Exporting a trained harness always includes
 its trainable files.
 
+Optimizer features, all offline-tested:
+
+- **Failure attribution.** Each trainable parameter receives the train
+  failures it plausibly affected:
+  - loop limits get failures that stopped on that limit;
+  - a tool description gets failures that called or expected that tool;
+  - prompts and files get every failure.
+
+  This is a heuristic, labeled as one in the proposer input.
+- **Optimizer memory.** The proposer sees past candidates' edits, outcomes,
+  and train scores, but never val scores. Every decision is also appended to
+  `history.jsonl` in the work directory.
+- **Incremental text edits.** A text parameter can be edited with
+  `{"op": "append"|"prepend", "text": ...}` or
+  `{"op": "replace", "old": ..., "new": ...}` instead of a full rewrite.
+  This follows ACE, and avoids eroding a long prompt through repeated
+  rewrites.
+- **`--selection pareto`.** Samples the next parent from the per-case Pareto
+  front of train outcomes, as GEPA does. A candidate that alone solves some
+  case keeps being explored. The default is `greedy`.
+- **`--screen-size N`.** Evaluates a candidate on N train cases first and
+  finishes the train evaluation only if it isn't worse there. Screening
+  costs are recorded like any other evaluation.
+
+Proposers can run through the gateway too, for example `--proposer llm
+--proposer-adapter gateway --proposer-model <model>`.
+
 `examples/trainable_qa/` is an offline, credential-free demo in which random
 search finds a better retrieval config (see its README for what that result
 does and doesn't show). `harness params <dir>` lists a harness's parameters.
@@ -244,10 +325,11 @@ src/harnesskit/
   linter/     static analysis rules (infinite loops, missing termination, ...)
   trace/      trajectory capture, cost estimation, run + baseline storage
   eval/       scorers, run/replay/compare/regression-gate, MockAdapter for tests
-  adapters/   translates HarnessSpec -> a runnable agent: raw_api, pydantic_ai, callback
+  adapters/   translates HarnessSpec -> a runnable agent: raw_api, gateway (OpenAI-compatible), pydantic_ai, callback
   scaffold/   NL spec -> ScaffoldPlan -> generated harness + self-validation
   packaging/  .harn bundle export/import with checksums, secrets excluded
   train/      trainable parameters, evidence, proposers, bounded train/val/test optimizer
+  skill/      the harnesskit Agent Skill (SKILL.md) for coding assistants
   cli/        `harness` command, wires everything together
 examples/react-web-researcher/   a working example harness.yaml
 examples/local_qa_recipe/        the local debugging walkthrough below
