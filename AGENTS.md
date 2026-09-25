@@ -141,6 +141,7 @@ branch must be integrated or explicitly stacked before dependent work starts.
 | HK-18 | Second-runtime qualification and replication | HK-06, HK-08, HK-10, HK-14 | TODO | |
 | HK-19 | Bounded harness optimizer | HK-11, HK-15, HK-16, HK-17, HK-18 | TODO | |
 | HK-20 | Release documentation and external pilot | HK-07, HK-08, HK-10, HK-14 | TODO | |
+| HK-21 | Trainable harness parameters and bounded train loop | HK-02, HK-03 | DONE (on branch) | `claude/admiring-lovelace-o638f6`: `trainable:` + `split:` format, `harnesskit.train`, `harness params`/`harness train`, offline `examples/trainable_qa`; 125 passed, 3 skipped |
 
 ### HK-01 — Baseline verification and offline CI
 
@@ -402,6 +403,36 @@ handoff should say what changed, what passed, what remains, and the commit/branc
 
 No implementation tasks have been claimed or completed through this task board yet.
 Existing functionality and the paired-comparison branch must be audited before work.
+
+### HK-21 — Trainable harness parameters and bounded train loop
+Status: DONE on branch `claude/admiring-lovelace-o638f6` (not merged)
+Priority: high (user direction: "requires_grad=True" for harness components, recursive improvement)
+Depends on: HK-02, HK-03
+Scope / expected behavior: a harness declares trainable components (prompt,
+files/skills/code, JSON values incl. tool descriptions, bounded spec fields);
+everything else is frozen and enforced frozen. A trainer proposes edits from
+train evidence, selects on val, reports once on test, records every candidate
+and cost, and can return "no supported improvement". Proposers: random
+search, scripted, and a harness-based (LLM) proposer that is itself a harness.
+Likely files: `src/harnesskit/train/`, `format/spec.py`, `cli/main.py`,
+`packaging/bundle.py`, `examples/trainable_qa/`, `tests/test_train.py`.
+Acceptance criteria: frozen components (tools, permissions, eval, guardrails)
+cannot change; proposer never sees val/test; unavailable cost blocks an
+unenforceable cap; offline demo improves on held-out test; exported trained
+harness keeps trained values.
+Validation commands / evidence: `python -m pytest -q` → 125 passed, 3 skipped
+(Python 3.11 venv; `tests/test_train.py` 30 tests); `python -m compileall -q src`;
+`git diff --check`; offline demo verdict `improved` (test 0.00 → 0.75, n=4).
+Known limitations: the LLM proposer path is tested only with a scripted fake
+client; RawAPIAdapter caps output at 1024 tokens, which can truncate large
+text-parameter proposals; `--max-cost` admission uses the largest observed
+evaluation as its estimate and cannot pre-reserve proposal calls.
+Out of scope: live LLM-proposer experiments (no authorized budget), the
+HK-19 comparison against manual/prompt-only baselines, and multi-parameter
+search strategies beyond greedy hill-climbing.
+Branch / integration status: implemented on `claude/admiring-lovelace-o638f6`;
+provides the optimizer core HK-19 needs, but HK-19's measured comparisons
+remain TODO.
 
 ## User-added tasks
 

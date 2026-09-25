@@ -52,7 +52,9 @@ def _forced_includes(harness_dir: Path) -> set[str]:
     itself, plus whatever it points scaffold.system_prompt at — the loader
     resolves that reference into inline text before HarnessSpec validation,
     so by the time we have a HarnessSpec the original path is gone and we
-    have to re-read the raw manifest to find it."""
+    have to re-read the raw manifest to find it. Files named by `trainable:`
+    file/json targets are forced too, so an exported trained harness never
+    silently loses its trained values."""
     import yaml
 
     forced = {"harness.yaml"}
@@ -60,6 +62,12 @@ def _forced_includes(harness_dir: Path) -> set[str]:
     scaffold = raw.get("scaffold", {})
     if scaffold.get("system_prompt_is_file", True) and "system_prompt" in scaffold:
         forced.add(scaffold["system_prompt"])
+    for param in raw.get("trainable") or []:
+        target = str(param.get("target", ""))
+        if target.startswith("file:"):
+            forced.add(Path(target[len("file:"):]).as_posix())
+        elif target.startswith("json:"):
+            forced.add(Path(target[len("json:"):].partition("#")[0]).as_posix())
     return forced
 
 

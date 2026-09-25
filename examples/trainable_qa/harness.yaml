@@ -1,0 +1,74 @@
+schema_version: 1
+metadata:
+  name: trainable-qa
+  version: 0.1.0
+  description: >
+    Offline demo for `harness train`: a deterministic keyword-lookup QA agent
+    whose retrieval/answer settings live in agent_config.json and are
+    declared trainable. Everything else (eval cases, termination, prompt
+    file) is frozen.
+
+model:
+  provider: none
+  model_id: "local:keyword-lookup"
+
+loop:
+  type: custom
+  max_turns: 1
+
+memory:
+  session: none
+
+termination:
+  - type: max_turns
+    value: 1
+
+# The requires_grad=True part: only these components may be edited by an
+# optimizer. Any candidate that changes something else is rejected.
+trainable:
+  - name: answer_mode
+    target: "json:agent_config.json#/answer_mode"
+    kind: choice
+    choices: [first_sentence, best_sentence]
+    description: Which sentence of the retrieved document to return.
+  - name: strip_stopwords
+    target: "json:agent_config.json#/strip_stopwords"
+    kind: choice
+    choices: [false, true]
+    description: Ignore common function words when matching question and corpus.
+  - name: min_overlap
+    target: "json:agent_config.json#/min_overlap"
+    kind: int
+    min: 0
+    max: 3
+    description: Minimum question/sentence word overlap before answering instead of "I don't know."
+  - name: system_prompt
+    target: scaffold.system_prompt
+    kind: text
+    requires_grad: false  # frozen: declared for visibility, never edited
+    description: Not read by this deterministic agent; kept frozen so no optimizer spends effort on it.
+
+eval:
+  cases:
+    # train: failure evidence is built from these
+    - {id: eiffel_city, split: train, input: "In which city does the Eiffel Tower stand?", expected_output_contains: ["Paris"]}
+    - {id: everest_height, split: train, input: "How high is the summit of Mount Everest?", expected_output_contains: ["8,849"]}
+    - {id: amazon_mouth, split: train, input: "Into which ocean does the Amazon River empty?", expected_output_contains: ["Atlantic"]}
+    - {id: unknown_mars, split: train, input: "Who painted the Mona Lisa?", expected_output_contains: ["don't know"]}
+    # val: candidates are selected on these
+    - {id: eiffel_year, split: val, input: "When was the Eiffel Tower completed?", expected_output_contains: ["1889"]}
+    - {id: wall_length, split: val, input: "What is the combined length of the Great Wall of China?", expected_output_contains: ["21,196"]}
+    - {id: moon_first_walk, split: val, input: "Who was the first person to walk on the Moon?", expected_output_contains: ["Armstrong"]}
+    - {id: unknown_python, split: val, input: "Who created the Python programming language?", expected_output_contains: ["don't know"]}
+    # test: evaluated once, at the end
+    - {id: everest_first_ascent, split: test, input: "Who made the first confirmed ascent of Everest?", expected_output_contains: ["Hillary"]}
+    - {id: wall_dynasty, split: test, input: "During which dynasty was most of the Great Wall built?", expected_output_contains: ["Ming"]}
+    - {id: moon_distance, split: test, input: "What is the average orbital distance of the Moon?", expected_output_contains: ["384,400"]}
+    - {id: unknown_telephone, split: test, input: "Who invented the telephone?", expected_output_contains: ["don't know"]}
+
+scaffold:
+  system_prompt: system_prompt.md
+  system_prompt_is_file: true
+
+packaging:
+  include: [agent.py, corpus/, train_demo.py]

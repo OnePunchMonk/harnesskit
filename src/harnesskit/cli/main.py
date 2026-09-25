@@ -822,5 +822,96 @@ def import_cmd(
     console.print(f"[green]✓[/green] Unpacked to {target}/ — checksums verified")
 
 
+@app.command()
+def params(
+    directory: Path = typer.Argument(Path(".")),
+    as_json: bool = typer.Option(False, "--json", help="Machine-readable output"),
+) -> None:
+    """List a harness's declared trainable parameters (its `requires_grad` set)."""
+    from harnesskit.train import HarnessModule, ParameterError
+
+    try:
+        module = HarnessModule(directory)
+    except (HarnessLoadError, ParameterError) as e:
+        _fail(str(e), False)
+    described = [p.describe() for p in module.parameters()]
+    if as_json:
+        console.print_json(json.dumps(described))
+        return
+    if not described:
+        console.print("[yellow]No trainable parameters declared.[/yellow] Add a `trainable:` section to harness.yaml.")
+        return
+    table = Table(show_header=True, header_style="bold")
+    for col in ("name", "requires_grad", "kind", "target", "constraints", "value"):
+        table.add_column(col)
+    for d in described:
+        constraints = ", ".join(f"{k}={d[k]}" for k in ("choices", "min", "max", "max_chars") if k in d)
+        table.add_row(d["name"], "yes" if d["requires_grad"] else "[dim]frozen[/dim]", d["kind"], d["target"], constraints, _truncate(json.dumps(d["value"]), 60))
+    console.print(table)
+    console.print("[dim]Everything not listed as requires_grad is frozen; candidates that change it are rejected.[/dim]")
+
+
+@app.command()
+def train(
+    directory: Path = typer.Argument(Path(".")),
+    out: Path = typer.Option(..., "--out", help="Empty work directory for candidates, best harness, and train_report.json"),
+    adapter_name: str = typer.Option("raw_api", "--adapter", help=f"One of: {', '.join(ADAPTERS)}, or custom:<file.py>:<factory>"),
+    proposer_name: str = typer.Option("random", "--proposer", help="random | scripted:<file.json> | llm | harness:<dir>"),
+    proposer_adapter: str = typer.Option("raw_api", "--proposer-adapter", help="Adapter that runs an llm/harness proposer"),
+    proposer_model: str = typer.Option("claude-sonnet-5", "--proposer-model", help="Model id for --proposer llm"),
+    steps: int = typer.Option(3, "--steps", min=1),
+    candidates: int = typer.Option(4, "--candidates", min=1, help="Candidates proposed per step"),
+    max_candidates: int = typer.Option(None, "--max-candidates", min=1),
+    max_cost: float = typer.Option(None, "--max-cost", help="Admission cap in USD across evaluation and proposal spend"),
+    allow_unmetered: bool = typer.Option(False, "--allow-unmetered", help="Continue under --max-cost even when some cost is unavailable"),
+    min_improvement: float = typer.Option(0.0, "--min-improvement", help="Required val pass-rate gain to accept a candidate"),
+    seed: int = typer.Option(0, "--seed"),
+    parallel: int = typer.Option(1, "--parallel", min=1),
+    as_json: bool = typer.Option(False, "--json", help="Print the full report as JSON"),
+) -> None:
+    """Optimize a harness's trainable parameters: propose on train evidence,
+    select on val, report once on held-out test."""
+    from harnesskit.train import HarnessModule, ParameterError, TrainBudget, Trainer, TrainError
+    from harnesskit.train.loading import resolve_adapter_factory, resolve_proposer
+
+    try:
+        module = HarnessModule(directory)
+        factory = resolve_adapter_factory(adapter_name)
+        proposer = resolve_proposer(proposer_name, adapter=proposer_adapter, model_id=proposer_model)
+        budget = TrainBudget(steps, candidates, max_candidates, max_cost, allow_unmetered)
+        trainer = Trainer(module, factory, proposer, out, budget=budget, seed=seed, min_improvement=min_improvement, max_workers=parallel)
+        result = trainer.fit()
+    except (HarnessLoadError, ParameterError, TrainError, ValueError, OSError) as e:
+        _fail(str(e), False)
+    if as_json:
+        console.print_json(json.dumps(result.to_dict(), default=str))
+        return
+    s = result.splits
+    console.print(f"splits ({s.source}): train={len(s.train)} val={len(s.val)} test={len(s.test)}")
+    table = Table(show_header=True, header_style="bold")
+    for col in ("id", "step", "status", "edits", "train", "val", "reason"):
+        table.add_column(col)
+    color = {"accepted": "green", "rejected": "yellow", "invalid": "red", "duplicate": "dim"}
+    for c in result.candidates:
+        table.add_row(
+            c.id, str(c.step), f"[{color[c.status]}]{c.status}[/{color[c.status]}]", _truncate(json.dumps(c.edits, default=str), 60),
+            f"{c.train.pass_rate:.2f}" if c.train else "-", f"{c.val.pass_rate:.2f}" if c.val else "-", c.reason,
+        )
+    console.print(table)
+    console.print(f"val pass rate: {result.initial_val.pass_rate:.2f} -> {result.best_val.pass_rate:.2f} (selection split; optimistic)")
+    spend = result.spend.to_dict()
+    cost = f"${spend['known_total_usd']:.4f} known" + ("" if spend["complete"] else f", {spend['entries_with_unavailable_cost']} entries with unavailable cost")
+    console.print(f"spend: {cost}")
+    console.print(f"stopped: {result.stop_reason}")
+    for note in result.notes:
+        console.print(f"[dim]note:[/dim] {note}")
+    if result.best_diff:
+        console.print("[bold]best diff:[/bold]")
+        console.print(result.best_diff, markup=False, highlight=False)
+    verdict_color = {"improved": "green", "inconclusive": "yellow"}.get(result.verdict, "red")
+    console.print(f"[{verdict_color}]verdict: {result.verdict}[/{verdict_color}] — {result.verdict_reason}")
+    console.print(f"report: {out / 'train_report.json'}")
+
+
 if __name__ == "__main__":
     app()

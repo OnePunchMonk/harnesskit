@@ -171,6 +171,70 @@ compare) for direct `import harnesskit` use — see the module docstring in
 `src/harnesskit/__init__.py` for the full list. Everything else in
 `harnesskit.*` remains CLI-only/internal and may change without notice.
 
+## Training a harness (`requires_grad` for harness components) — experimental
+
+A harness can declare which of its components an optimizer may edit, the
+harness equivalent of `requires_grad=True`:
+
+```yaml
+trainable:
+  - name: system_prompt
+    target: scaffold.system_prompt        # the prompt file
+  - name: style_skill
+    target: file:skills/answer_style.md   # any file: a skill, prompt fragment, or code component
+  - name: search_description
+    target: json:tools/search.json#/description   # tool descriptions, never their schema
+  - name: max_turns
+    target: loop.max_turns
+    kind: int
+    min: 2
+    max: 12
+  - name: model
+    target: model.model_id
+    kind: choice
+    choices: [claude-haiku-4-5-20251001, claude-sonnet-5]
+```
+
+Anything not declared is **frozen**. That includes tools and their
+permissions, guardrails, termination, eval cases, `harness.yaml` as a file,
+anything under `eval/`, and whole tool schemas. `HarnessModule.materialize()`
+writes each candidate as a new harness directory, reloads it, and rejects it
+if anything outside the declared targets changed. This means a proposer
+cannot quietly change what a tool does or what the eval measures.
+
+`harness train` (or `harnesskit.train.Trainer`) runs a bounded loop:
+
+1. Build **evidence** from the current best harness's *train* cases: failing
+   inputs, expected checks, actual outputs, failed scorers, and tool calls.
+   This plays the role of a backward pass, but it is not a gradient.
+2. A **proposer** turns that evidence into edits. `random` is equal-budget
+   random search over bounded choice and numeric parameters (the baseline to
+   beat). `scripted:<file.json>` is a list of hand-written candidates. `llm`
+   and `harness:<dir>` use a *proposer harness* run through any adapter.
+   Because the proposer is itself a harness, its own prompt can be declared
+   trainable and optimized the same way, which is the recursive case.
+3. Each candidate is evaluated on train, then on **val** only if train did
+   not get worse. It is accepted only if it beats the current best on val.
+4. The original and the selected harness are each run **once** on the
+   untouched **test** split and compared case by case. The verdict is
+   `improved` only when the test gain's paired 95% CI excludes zero. A
+   positive but uncertain gain is `inconclusive`. Everything else is
+   `no_supported_improvement`, which is a valid and common outcome.
+
+Splits come from a per-case `split: train|val|test`, or from a seeded hash of
+case ids when no case declares one. Every candidate (accepted, rejected,
+invalid, or duplicate), its diff, and every evaluation and proposal cost go
+into `train_report.json`. `--max-cost` is an admission check: it compares
+spend so far plus the largest evaluation seen so far against the cap. It is
+not a guaranteed bill cap, and any overrun is recorded. If some cost is
+unavailable, training stops rather than pretend the cap is enforced, unless
+`--allow-unmetered` is passed. Exporting a trained harness always includes
+its trainable files.
+
+`examples/trainable_qa/` is an offline, credential-free demo in which random
+search finds a better retrieval config (see its README for what that result
+does and doesn't show). `harness params <dir>` lists a harness's parameters.
+
 ## Layout
 
 ```
@@ -183,9 +247,11 @@ src/harnesskit/
   adapters/   translates HarnessSpec -> a runnable agent: raw_api, pydantic_ai, callback
   scaffold/   NL spec -> ScaffoldPlan -> generated harness + self-validation
   packaging/  .harn bundle export/import with checksums, secrets excluded
+  train/      trainable parameters, evidence, proposers, bounded train/val/test optimizer
   cli/        `harness` command, wires everything together
 examples/react-web-researcher/   a working example harness.yaml
 examples/local_qa_recipe/        the local debugging walkthrough below
+examples/trainable_qa/           offline `harness train` demo (trainable params, splits, verdicts)
 ```
 
 ## Bring your own agent, and the local debugging walkthrough

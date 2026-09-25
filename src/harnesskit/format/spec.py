@@ -132,12 +132,41 @@ class EvalCase(BaseModel):
     max_cost_usd: float | None = None
     scoring_mode: ScoringMode = ScoringMode.exact_match
     ground_truth: str | None = None
+    # Which partition this case belongs to when the harness is trained
+    # (`harness train`): "train" cases feed failure evidence to the proposer,
+    # "val" cases select among candidates, "test" cases are evaluated once at
+    # the end. Ignored by `harness eval`, which always runs every case.
+    split: Literal["train", "val", "test"] | None = None
 
 
 class EvalConfig(BaseModel):
     cases: list[EvalCase] = Field(default_factory=list)
     cases_file: str | None = None  # path to a jsonl file of EvalCase records
     thresholds: dict[str, float] = Field(default_factory=dict)
+
+
+class ParameterKind(str, Enum):
+    text = "text"
+    int = "int"
+    float = "float"
+    choice = "choice"
+
+
+class TrainableParam(BaseModel):
+    """One harness component the optimizer may edit — the harness analogue of
+    a tensor with ``requires_grad=True``. Everything not declared here is
+    frozen; see ``harnesskit.train.params`` for the supported ``target``
+    forms and the components that can never be made trainable."""
+
+    name: str
+    target: str  # "scaffold.system_prompt", "loop.max_turns", "file:skills/x.md", "json:agent.json#/mode", ...
+    kind: ParameterKind = ParameterKind.text
+    requires_grad: bool = True
+    description: str | None = None  # what the parameter means, shown to proposers
+    choices: list[bool | int | float | str] | None = None  # bool first: keeps YAML true/false from becoming 1/0
+    min: float | None = None
+    max: float | None = None
+    max_chars: int | None = None
 
 
 class HookPoint(str, Enum):
@@ -178,6 +207,7 @@ class HarnessSpec(BaseModel):
     hooks: list[Hook] = Field(default_factory=list)
     scaffold: ScaffoldConfig
     packaging: PackagingConfig = Field(default_factory=PackagingConfig)
+    trainable: list[TrainableParam] = Field(default_factory=list)
 
     # populated by the loader, not part of the YAML itself
     source_dir: Path | None = Field(default=None, exclude=True)

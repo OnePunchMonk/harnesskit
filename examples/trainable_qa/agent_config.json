@@ -1,0 +1,5 @@
+{
+  "answer_mode": "first_sentence",
+  "strip_stopwords": false,
+  "min_overlap": 0
+}
